@@ -1,0 +1,82 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "goals",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "request_changes"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "Two or three sentences: the verdict and the main reason."
+    },
+    "goals": {
+      "type": "array",
+      "description": "One entry per acceptance criterion in the approved design.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "criterion",
+          "met",
+          "evidence"
+        ],
+        "properties": {
+          "criterion": {
+            "type": "string"
+          },
+          "met": {
+            "type": "boolean"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Short pointer to the evidence, e.g. a file:line or test name."
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "path",
+          "line",
+          "body"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocking",
+              "suggestion"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "Repository-relative file path, or empty."
+          },
+          "line": {
+            "type": "integer",
+            "description": "Line in the new version of the file, or 0."
+          },
+          "body": {
+            "type": "string",
+            "description": "Problem, impact and expected behaviour, in two or three sentences."
+          }
+        }
+      }
+    }
+  }
+}

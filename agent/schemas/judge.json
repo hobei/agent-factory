@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "risk",
+    "reasons",
+    "summary"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "auto_merge",
+        "human_review"
+      ]
+    },
+    "risk": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Why human review is needed, one short line each. Empty for auto_merge."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Two or three sentences."
+    }
+  }
+}

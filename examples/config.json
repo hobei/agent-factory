@@ -1,0 +1,15 @@
+{
+  "commands": {
+    "build": "./scripts/build.sh",
+    "test": "./scripts/test.sh"
+  },
+  "design": {
+    "dir": "docs",
+    "specFile": "docs/design.md"
+  },
+  "judge": {
+    "protectedPaths": [".github/**", "CLAUDE.md", "scripts/**"],
+    "sourcePaths": ["src/**"],
+    "testPaths": ["tests/**"]
+  }
+}

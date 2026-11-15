@@ -1,0 +1,66 @@
+name: Run Claude agent
+description: >
+  Run Claude Code headless for one agent role with the role's tool allowlist and
+  JSON schema, and save the structured result. No GitHub token is exposed to Claude.
+inputs:
+  role:
+    description: designer | developer | reviewer | judge
+    required: true
+  working-directory:
+    description: Checkout Claude works in
+    required: true
+  runtime-directory:
+    description: Directory holding <role>-prompt.md; <role>-result.json is written here
+    required: true
+  oauth-token:
+    description: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
+    required: false
+  api-key:
+    description: ANTHROPIC_API_KEY (alternative to the OAuth token)
+    required: false
+  model:
+    description: Override the model from config.json
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Run Claude (${{ inputs.role }})
+      shell: bash
+      env:
+        ROLE: ${{ inputs.role }}
+        WD: ${{ inputs.working-directory }}
+        RT: ${{ inputs.runtime-directory }}
+        OAUTH: ${{ inputs.oauth-token }}
+        APIKEY: ${{ inputs.api-key }}
+        AGENT_MODEL: ${{ inputs.model }}
+        AGENT_DIR: ${{ github.action_path }}/../../agent
+      run: |
+        set -euo pipefail
+        if [ -z "$OAUTH" ] && [ -z "$APIKEY" ]; then
+          echo "::error::Add the CLAUDE_CODE_OAUTH_TOKEN repository secret (run 'claude setup-token' locally)."
+          exit 1
+        fi
+        # Role settings from config.json: cli version, model, effort, schema path, then allowed tools.
+        CFG=()
+        while IFS= read -r line; do CFG+=("$line"); done < <(node "$AGENT_DIR/lib/claude-args.cjs" "$ROLE")
+        CLI_VERSION="${CFG[0]}"; MODEL="${CFG[1]}"; EFFORT="${CFG[2]}"; SCHEMA="${CFG[3]}"
+        TOOLS=("${CFG[@]:4}")
+        if ! command -v claude >/dev/null || [ "$(claude --version 2>/dev/null | awk '{print $1}')" != "$CLI_VERSION" ]; then
+          npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLI_VERSION}" >/dev/null
+        fi
+        args=(-p --output-format json --json-schema "$(cat "$SCHEMA")" --model "$MODEL"
+              --permission-mode dontAsk --no-session-persistence)
+        if [ -n "$EFFORT" ]; then args+=(--effort "$EFFORT"); fi
+        args+=(--allowedTools "${TOOLS[@]}")
+        echo "Role: $ROLE · model: $MODEL · effort: ${EFFORT:-default}"
+        printf 'Allowed tool: %s\n' "${TOOLS[@]}"
+        raw="$RT/$ROLE-raw.json"
+        cd "$WD"
+        set +e
+        if [ -n "$OAUTH" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH"; else export ANTHROPIC_API_KEY="$APIKEY"; fi
+        claude "${args[@]}" < "$RT/$ROLE-prompt.md" > "$raw"
+        code=$?
+        set -e
+        unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
+        node "$AGENT_DIR/lib/claude-extract.cjs" "$raw" "$RT/$ROLE-result.json" "$ROLE" "$code"

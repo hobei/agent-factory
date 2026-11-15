@@ -1,0 +1,36 @@
+name: Agent factory stage step
+description: >
+  Run one trusted step of the agent factory (route, control, <stage>.prepare/publish/...,
+  failure) with actions/github-script. The code comes from this action's own checkout,
+  so it is always the pinned factory version, never the project's PR branch.
+inputs:
+  call:
+    description: Function to run, e.g. `route`, `design.prepare`, `review.publish`
+    required: true
+outputs:
+  stage: { description: route result, value: "${{ steps.run.outputs.stage }}" }
+  issue: { description: route result, value: "${{ steps.run.outputs.issue }}" }
+  pr: { description: route result, value: "${{ steps.run.outputs.pr }}" }
+  approved_sha: { description: route result, value: "${{ steps.run.outputs.approved_sha }}" }
+  reset: { description: route result, value: "${{ steps.run.outputs.reset }}" }
+  retry: { description: route result, value: "${{ steps.run.outputs.retry }}" }
+  op: { description: route result, value: "${{ steps.run.outputs.op }}" }
+  amend: { description: route result, value: "${{ steps.run.outputs.amend }}" }
+  ref: { description: commit to check out for the agent, value: "${{ steps.run.outputs.ref }}" }
+  build: { description: project build command (review.prepare), value: "${{ steps.run.outputs.build }}" }
+  test: { description: project test command (review.prepare), value: "${{ steps.run.outputs.test }}" }
+runs:
+  using: composite
+  steps:
+    - id: run
+      uses: actions/github-script@v8
+      env:
+        CALL: ${{ inputs.call }}
+        FACTORY_LIB: ${{ github.action_path }}/../../agent/lib
+      with:
+        script: |
+          const stages = require(`${process.env.FACTORY_LIB}/stages.cjs`);
+          const [group, step] = process.env.CALL.split('.');
+          const fn = step ? stages[group] && stages[group][step] : stages[group];
+          if (typeof fn !== 'function') throw new Error(`Unknown factory step "${process.env.CALL}"`);
+          return fn({ github, context, core });

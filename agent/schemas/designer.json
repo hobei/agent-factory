@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "questions",
+    "title",
+    "summary",
+    "reply",
+    "thread_replies"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "needs_clarification",
+        "design_ready"
+      ]
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Specific questions for the human, one sentence each plus short options. Shown as a numbered list after `reply`. Empty unless status is needs_clarification."
+    },
+    "title": {
+      "type": "string",
+      "description": "Short PR title for the change (no issue number)."
+    },
+    "summary": {
+      "type": "string",
+      "description": "The design proposal in Markdown with sections Request, Acceptance criteria, Design, Test plan, Out of scope, Assumptions. Becomes the PR description and, on approval, the frozen contract on the issue."
+    },
+    "reply": {
+      "type": "string",
+      "description": "Short Markdown message to the humans (at most ~6 lines): what changed and, for feedback not answered in a thread, how you handled it. Do not repeat the design or the thread replies."
+    },
+    "thread_replies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "comment_id",
+          "body"
+        ],
+        "properties": {
+          "comment_id": {
+            "type": "integer",
+            "description": "comment_id of an inline comment shown in the conversation."
+          },
+          "body": {
+            "type": "string",
+            "description": "One or two sentences: what you did about this comment, or why you made no change."
+          }
+        }
+      },
+      "description": "One in-thread reply per NEW inline review comment you were given. Empty if there are none."
+    }
+  }
+}

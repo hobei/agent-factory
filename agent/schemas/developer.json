@@ -1,0 +1,82 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "tests",
+    "addressed",
+    "blocked_reason",
+    "thread_replies"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "implemented",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short Markdown summary of the changes: a few bullets, no restating of the design."
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command",
+          "passed",
+          "detail"
+        ],
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string",
+            "description": "One short line, e.g. '12/12 passed'."
+          }
+        }
+      }
+    },
+    "addressed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "One short line per review finding or human request that was NOT answered in a thread. Empty on a first implementation."
+    },
+    "blocked_reason": {
+      "type": "string",
+      "description": "Why the approved design cannot be implemented as written. Empty unless blocked."
+    },
+    "thread_replies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "comment_id",
+          "body"
+        ],
+        "properties": {
+          "comment_id": {
+            "type": "integer",
+            "description": "comment_id of an inline comment shown in the conversation."
+          },
+          "body": {
+            "type": "string",
+            "description": "One or two sentences: what you did about this comment, or why you made no change."
+          }
+        }
+      },
+      "description": "One in-thread reply per NEW inline review comment you were given. Empty if there are none."
+    }
+  }
+}
