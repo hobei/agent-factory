@@ -6,7 +6,6 @@
 // the workflow run.
 
 const core = require('./core.cjs');
-const { loadConfig } = require('./config.cjs');
 
 const LABELS = {
   needsInfo: { name: 'agent:needs-info', color: 'fbca04', description: 'Designer agent is waiting for clarification' },
@@ -19,10 +18,12 @@ const BOT_EMAIL = '41898282+github-actions[bot]@users.noreply.github.com';
 const STATUS_CONTEXT = 'agent/ci';
 
 class Gh {
-  constructor(github, context) {
+  // options.workflowFile: the project's caller workflow, which dispatch() re-runs.
+  constructor(github, context, { workflowFile = 'agent.yml' } = {}) {
     this.github = github;
     this.context = context;
     this.repo = context.repo; // {owner, repo}
+    this.workflowFile = workflowFile;
   }
 
   get runUrl() {
@@ -108,7 +109,7 @@ class Gh {
   async dispatch(stage, number) {
     await this.github.rest.actions.createWorkflowDispatch({
       ...this.repo,
-      workflow_id: loadConfig().workflowFile, // the project's caller workflow
+      workflow_id: this.workflowFile,
       ref: await this.defaultBranch(),
       inputs: { stage, number: String(number) },
     });

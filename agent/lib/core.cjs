@@ -3,25 +3,29 @@
 // parsing helpers. No GitHub or filesystem access here so it can be unit tested
 // (agent/tests/core.test.cjs).
 //
-// PR phases (state.phase) and who acts in each:
-//   design     designer drafts/revises; waits for a human Approve
-//   implement  developer is working
-//   review     CI + reviewer agent
-//   judge      judge agent
-//   human      handed to a human (label agent:needs-human)
-//   stopped    paused by /agent stop
-//   merged     done
+// PR phases (state.phase). The four agent phases have the same name as the stage
+// (and workflow job) that runs in them:
+//   design   designer drafts/revises; waits for a human Approve
+//   develop  developer is working
+//   review   CI + reviewer agent
+//   judge    judge agent
+//   human    handed to a human (label agent:needs-human)
+//   stopped  paused by /agent stop (state.previousPhase remembers where)
+//   merged   done
+//
+// state.feedbackFrom (ISO time): conversation entries after this time have not been
+// handled yet. A stage that hands off sets it to the time it started, so the next
+// agent sees what was posted since (see stages/shared.cjs → handOff).
 
 const BRANCH_PREFIX = 'agent/issue-';
 const STATE_RE = /<!--\s*agent-state\s*(\{[\s\S]*?\})\s*-->/;
 const DESC_START = '<!-- agent-description -->';
 const DESC_END = '<!-- /agent-description -->';
 
-// Phase -> the stage that does the work in that phase.
-const PHASE_STAGE = { design: 'design', implement: 'develop', review: 'review', judge: 'judge' };
+// Agent stages. In these phases the stage of the same name does the work.
 const STAGES = ['design', 'develop', 'review', 'judge'];
 // Phases in which an agent stage is running. Human feedback then waits in a queue.
-const BUSY_PHASES = ['implement', 'review', 'judge'];
+const BUSY_PHASES = ['develop', 'review', 'judge'];
 
 const ROLE_ICON = { designer: '🧭 Designer', developer: '🛠️ Developer', reviewer: '🔍 Reviewer', judge: '⚖️ Judge', workflow: '🤖 Workflow' };
 
@@ -31,10 +35,29 @@ function parseState(body) {
   const m = (body || '').match(STATE_RE);
   if (!m) return null;
   try {
-    return JSON.parse(m[1]);
+    return normalizeState(JSON.parse(m[1]));
   } catch {
     return null;
   }
+}
+
+// PRs opened by factory ≤ v1.2 store phase "implement" and "since"; read them as the
+// current names so PRs in flight across an upgrade keep working.
+function normalizeState(state) {
+  const out = { ...state };
+  const rename = (p) => (p === 'implement' ? 'develop' : p);
+  out.phase = rename(out.phase);
+  if (out.previousPhase) out.previousPhase = rename(out.previousPhase);
+  if (out.since !== undefined) {
+    if (out.feedbackFrom === undefined) out.feedbackFrom = out.since;
+    delete out.since;
+  }
+  return out;
+}
+
+// Conversation entries the agents haven't handled yet (posted after `from`).
+function entriesAfter(entries, from) {
+  return from ? (entries || []).filter((e) => String(e.at) > String(from)) : [...(entries || [])];
 }
 
 function parseDescription(body) {
@@ -51,7 +74,7 @@ function phaseHint(state) {
     case 'design':
       if (state.amend) return 'Designer is amending the approved design at your request. Development continues automatically once it is done.';
       return 'Waiting for **human design review**. Submit an **Approve** review to start development, or comment / request changes and the designer will revise.';
-    case 'implement':
+    case 'develop':
       return `Developer agent is implementing (attempt ${state.attempt || 1} of ${max}).`;
     case 'review':
       return 'Reviewer agent is checking the implementation against the approved design.';
@@ -137,7 +160,7 @@ function route(i) {
     if (i.pr) {
       if (!i.prState) return none(`PR #${i.pr.number} is not managed by the agents`);
       if (i.pr.state !== 'open') return none(`PR #${i.pr.number} is closed`);
-      if (PHASE_STAGE[i.prState.phase] !== want) {
+      if (i.prState.phase !== want) {
         return none(`stale handoff: asked for ${want} but PR #${i.pr.number} is in phase "${i.prState.phase}"`);
       }
       return { stage: want, pr: i.pr.number, issue: i.prState.issue, note: `dispatch → ${want}` };
@@ -189,9 +212,8 @@ function route(i) {
     const cmd = parseCommand(i.comment && i.comment.body);
     if (cmd === 'stop') return { ...base, stage: 'control', op: 'stop', note: '/agent stop' };
     if (cmd === 'retry') {
-      const phase = st.phase === 'stopped' ? st.previousPhase : st.phase;
-      const stage = PHASE_STAGE[phase];
-      if (!stage) return none(`nothing to retry in phase "${st.phase}"`);
+      const stage = st.phase === 'stopped' ? st.previousPhase : st.phase;
+      if (!STAGES.includes(stage)) return none(`nothing to retry in phase "${st.phase}"`);
       return { ...base, stage, retry: true, resume: st.phase === 'stopped', note: `/agent retry → ${stage}` };
     }
     if (cmd === 'redesign') {
@@ -281,11 +303,11 @@ function commitTitle(suggested, fallback) {
 function reviewTransition({ verdict, findings, ciPassed, attempt, maxAttempts }) {
   const blocking = (findings || []).filter((f) => f.severity === 'blocking');
   const accepted = verdict === 'approve' && blocking.length === 0 && ciPassed;
-  if (accepted) return { phase: 'judge', next: 'judge' };
+  if (accepted) return { next: 'judge' };
   if ((attempt || 0) >= maxAttempts) {
-    return { phase: 'human', next: null, reason: `reviewer still has blocking findings after ${attempt} developer attempts` };
+    return { next: 'human', reason: `reviewer still has blocking findings after ${attempt} developer attempts` };
   }
-  return { phase: 'implement', next: 'develop' };
+  return { next: 'develop' };
 }
 
 // ---------------------------------------------------------------- judge policy
@@ -389,10 +411,12 @@ function truncate(text, max) {
 
 module.exports = {
   BRANCH_PREFIX,
-  PHASE_STAGE,
+  STAGES,
   BUSY_PHASES,
   ROLE_ICON,
   parseState,
+  normalizeState,
+  entriesAfter,
   parseDescription,
   renderBody,
   issueFromBranch,

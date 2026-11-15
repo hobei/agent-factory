@@ -71,14 +71,9 @@ jobs:
       issues: read
       pull-requests: read
     outputs:
-      stage: ${{ steps.route.outputs.stage }}
-      issue: ${{ steps.route.outputs.issue }}
-      pr: ${{ steps.route.outputs.pr }}
-      approved_sha: ${{ steps.route.outputs.approved_sha }}
-      reset: ${{ steps.route.outputs.reset }}
-      retry: ${{ steps.route.outputs.retry }}
-      op: ${{ steps.route.outputs.op }}
-      amend: ${{ steps.route.outputs.amend }}
+      route: ${{ steps.route.outputs.route }} # the decision as JSON → env ROUTE in each job
+      stage: ${{ steps.route.outputs.stage }} # for the jobs' `if:`
+      issue: ${{ steps.route.outputs.issue }} # for the per-issue concurrency group
     steps:
       - uses: actions/checkout@v5
         with:
@@ -112,9 +107,7 @@ jobs:
           persist-credentials: false
       - uses: hobei/agent-factory/actions/stages@v1
         env:
-          PR: ${{ needs.route.outputs.pr }}
-          OP: ${{ needs.route.outputs.op }}
-          APPROVED_SHA: ${{ needs.route.outputs.approved_sha }}
+          ROUTE: ${{ needs.route.outputs.route }}
         with:
           call: control
 
@@ -134,9 +127,7 @@ jobs:
       issues: write
       pull-requests: write
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
-      AMEND: ${{ needs.route.outputs.amend }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -157,8 +148,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: designer
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}
@@ -189,11 +178,7 @@ jobs:
       issues: write
       pull-requests: write
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
-      RESET: ${{ needs.route.outputs.reset }}
-      RETRY: ${{ needs.route.outputs.retry }}
-      APPROVED_SHA: ${{ needs.route.outputs.approved_sha }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -214,8 +199,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: developer
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}
@@ -250,8 +233,7 @@ jobs:
       pull-requests: write
       statuses: write
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -287,8 +269,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: reviewer
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}
@@ -319,8 +299,7 @@ jobs:
       pull-requests: write
       statuses: read
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -344,8 +323,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: judge
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}

@@ -112,7 +112,7 @@ test('after hand-over, review comments on design files send the PR back to the d
 test('/agent redesign only works once the PR is with a human', () => {
   const d = lib.route({ ...prEvent('human'), name: 'issue_comment', comment: { body: '/agent redesign rename Rep' } });
   assert.deepEqual([d.stage, d.amend, d.pr, d.issue], ['design', true, 9, 5]);
-  for (const phase of ['design', 'implement', 'review', 'judge']) {
+  for (const phase of ['design', 'develop', 'review', 'judge']) {
     assert.equal(lib.route({ ...prEvent(phase), name: 'issue_comment', comment: { body: '/agent redesign' } }).stage, 'none');
   }
 });
@@ -129,7 +129,7 @@ test('threadTargets maps inline comments to their thread root', () => {
 });
 
 test('feedback while agents are busy is queued for the developer; approvals are ignored', () => {
-  for (const phase of ['implement', 'review', 'judge']) {
+  for (const phase of ['develop', 'review', 'judge']) {
     const c = lib.route({ ...prEvent(phase), name: 'issue_comment', comment: { body: 'use a constant' } });
     assert.deepEqual([c.stage, c.op, c.pr], ['control', 'queue', 9]);
     for (const state of ['changes_requested', 'commented']) {
@@ -175,14 +175,14 @@ test('commitTitle makes one short line, with a fallback', () => {
 
 test('renderBody status shows attempts only after the first', () => {
   assert.doesNotMatch(lib.renderBody('d', { issue: 1, phase: 'review', attempt: 1, maxAttempts: 3 }), /attempt \d/);
-  assert.match(lib.renderBody('d', { issue: 1, phase: 'implement', attempt: 2, maxAttempts: 3 }), /attempt 2\/3/);
+  assert.match(lib.renderBody('d', { issue: 1, phase: 'develop', attempt: 2, maxAttempts: 3 }), /attempt 2\/3/);
   assert.match(lib.renderBody('d', { issue: 1, phase: 'human', reason: 'risky' }), /\*\*Needs you\*\*: risky/);
 });
 
 test('/agent stop and /agent retry', () => {
   const stop = lib.route({ ...prEvent('review'), name: 'issue_comment', comment: { body: '/agent stop' } });
   assert.deepEqual([stop.stage, stop.op], ['control', 'stop']);
-  const retry = lib.route({ ...prEvent('implement'), name: 'issue_comment', comment: { body: '/agent retry' } });
+  const retry = lib.route({ ...prEvent('develop'), name: 'issue_comment', comment: { body: '/agent retry' } });
   assert.deepEqual([retry.stage, retry.retry], ['develop', true]);
   const resume = lib.route({ ...prEvent('stopped', { previousPhase: 'review' }), name: 'issue_comment', comment: { body: '/agent retry' } });
   assert.equal(resume.stage, 'review');
@@ -207,9 +207,9 @@ test('dispatch handoffs must match the PR phase', () => {
   const bot = { login: 'github-actions[bot]', type: 'Bot' };
   const d = (stage, phase) => lib.route({ name: 'workflow_dispatch', sender: bot, allowed: false, dispatch: { stage }, pr, prState: { issue: 5, phase } });
   assert.equal(d('review', 'review').stage, 'review');
-  assert.equal(d('develop', 'implement').stage, 'develop');
+  assert.equal(d('develop', 'develop').stage, 'develop');
   assert.equal(d('judge', 'judge').stage, 'judge');
-  assert.equal(d('review', 'implement').stage, 'none');
+  assert.equal(d('review', 'develop').stage, 'none');
   assert.equal(d('judge', 'stopped').stage, 'none');
 });
 
@@ -227,7 +227,7 @@ test('reviewTransition: approve → judge, findings → develop, budget exhauste
   assert.equal(lib.reviewTransition({ ...ok, ciPassed: false }).next, 'develop');
   assert.equal(lib.reviewTransition({ ...ok, findings: [{ severity: 'blocking' }] }).next, 'develop');
   assert.equal(lib.reviewTransition({ ...ok, findings: [{ severity: 'suggestion' }] }).next, 'judge');
-  assert.equal(lib.reviewTransition({ ...ok, verdict: 'request_changes', attempt: 3 }).phase, 'human');
+  assert.equal(lib.reviewTransition({ ...ok, verdict: 'request_changes', attempt: 3 }).next, 'human');
 });
 
 // ---------------------------------------------------------------- judge policy
@@ -277,4 +277,22 @@ test('parseClaudeOutput prefers structured_output and falls back to result text'
   assert.throws(() => lib.parseClaudeOutput(JSON.stringify({ subtype: 'error_max_turns', is_error: true })), /failed/);
   assert.throws(() => lib.parseClaudeOutput('nope'), /JSON/);
   assert.throws(() => lib.parseClaudeOutput(JSON.stringify({ subtype: 'success', result: 'no json' })), /structured/);
+});
+
+test('state from factory ≤ v1.2 is read with the current names', () => {
+  const old = lib.renderBody('d', { issue: 3, phase: 'implement', since: '2026-01-01T00:00:00Z', attempt: 1 });
+  const s = lib.parseState(old);
+  assert.equal(s.phase, 'develop');
+  assert.equal(s.feedbackFrom, '2026-01-01T00:00:00Z');
+  assert.equal(s.since, undefined);
+  assert.equal(lib.normalizeState({ phase: 'stopped', previousPhase: 'implement' }).previousPhase, 'develop');
+  // a newer feedbackFrom wins over a leftover since
+  assert.equal(lib.normalizeState({ phase: 'review', since: 'a', feedbackFrom: 'b' }).feedbackFrom, 'b');
+});
+
+test('entriesAfter keeps entries posted after the time, or all without one', () => {
+  const entries = [{ at: '2026-01-01T00:00:00Z' }, { at: '2026-01-02T00:00:00Z' }];
+  assert.deepEqual(lib.entriesAfter(entries, '2026-01-01T12:00:00Z'), [entries[1]]);
+  assert.deepEqual(lib.entriesAfter(entries, null), entries);
+  assert.deepEqual(lib.entriesAfter(undefined, null), []);
 });

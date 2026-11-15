@@ -4,8 +4,8 @@ has approved a design. Implement exactly that design.
 - **The contract is the "Approved design" section below**, frozen at the moment
   the human approved it, together with `{{specFile}}`. Read both, plus
   `CLAUDE.md`, before you change anything.
-- Do not edit `{{designDir}}/`, `.github/` or `CLAUDE.md`. The design is fixed, and the
-  workflow configuration is off-limits.
+- Do not edit {{developerForbiddenPaths}}. The design is fixed, and the
+  workflow configuration is off-limits. The workflow rejects edits there.
 - Add or update tests as the test plan describes, so that every acceptance
   criterion is covered.
 - Build and test with `{{build}}` then `{{test}}`. Run each
@@ -44,10 +44,3 @@ If the approved design cannot be implemented as written (for example, it
 contradicts itself or needs something it rules out), return
 `status: "blocked"` with the reason. Do not improvise a different design;
 a human will decide.
-
-## Writing style
-
-Everything you write is posted on GitHub for a busy human. Be brief: short
-sentences, bullets over paragraphs, no preamble, no restating what the reader
-can already see (the issue, the design, the diff). Say what you did or decided
-and why, in as few words as carry the meaning.

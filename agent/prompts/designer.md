@@ -70,13 +70,6 @@ one, add an entry to `thread_replies` with that id and a one- or two-sentence
 answer; it is posted in the comment's own thread. Do not repeat those answers
 in `reply`.
 
-## Writing style
-
-Everything you write is posted on GitHub for a busy human. Be brief: short
-sentences, bullets over paragraphs, no preamble, no restating what the reader
-can already see (the issue, the design, the diff). Say what you did or decided
-and why, in as few words as carry the meaning.
-
 ## Output
 
 Return the structured result only. The workflow commits your file edits. Do not

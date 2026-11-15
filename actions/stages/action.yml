@@ -4,9 +4,9 @@
 #
 #     - uses: hobei/agent-factory/actions/stages@v1
 #       with:
-#         call: develop.prepare        # → require('agent/lib/stages.cjs').develop.prepare(...)
+#         call: develop.prepare        # → agent/lib/stages/develop.cjs → prepare(...)
 #
-# It runs the named function from agent/lib/stages.cjs inside actions/github-script,
+# It runs the named function from agent/lib/stages/ inside actions/github-script,
 # which supplies three things the code needs:
 #   github  - an authenticated Octokit client (the job's GITHUB_TOKEN)
 #   context - the triggering event (payload, repo, run id)
@@ -28,15 +28,11 @@ inputs:
     description: Function to run, e.g. `route`, `design.prepare`, `review.publish`
     required: true
 outputs:
-  # Set by `route`: which job runs next, for which issue/PR, and with which flags.
-  stage: { description: route result, value: "${{ steps.run.outputs.stage }}" }
-  issue: { description: route result, value: "${{ steps.run.outputs.issue }}" }
-  pr: { description: route result, value: "${{ steps.run.outputs.pr }}" }
-  approved_sha: { description: route result, value: "${{ steps.run.outputs.approved_sha }}" }
-  reset: { description: route result, value: "${{ steps.run.outputs.reset }}" }
-  retry: { description: route result, value: "${{ steps.run.outputs.retry }}" }
-  op: { description: route result, value: "${{ steps.run.outputs.op }}" }
-  amend: { description: route result, value: "${{ steps.run.outputs.amend }}" }
+  # Set by `route`. `route` is the whole decision as JSON (jobs get it as env ROUTE);
+  # `stage` and `issue` are copies the workflow YAML needs for `if:` and `concurrency:`.
+  route: { description: route decision (JSON), value: "${{ steps.run.outputs.route }}" }
+  stage: { description: next job, value: "${{ steps.run.outputs.stage }}" }
+  issue: { description: issue number, value: "${{ steps.run.outputs.issue }}" }
   # Set by each stage's `prepare`: the commit Claude's working copy is checked out at.
   ref: { description: commit to check out for the agent, value: "${{ steps.run.outputs.ref }}" }
   # Set by `review.prepare`: the project's commands for the deterministic CI step.
@@ -53,7 +49,7 @@ runs:
       with:
         script: |
           // "develop.prepare" → stages.develop.prepare; "route" → stages.route
-          const stages = require(`${process.env.FACTORY_LIB}/stages.cjs`);
+          const stages = require(`${process.env.FACTORY_LIB}/stages/index.cjs`);
           const [group, step] = process.env.CALL.split('.');
           const fn = step ? stages[group] && stages[group][step] : stages[group];
           if (typeof fn !== 'function') throw new Error(`Unknown factory step "${process.env.CALL}"`);

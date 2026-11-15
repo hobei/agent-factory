@@ -62,3 +62,21 @@ test('prompts: factory default, project replacement, project append', () => {
 
   assert.throws(() => loadPrompt('hacker', cfg, ''), /unknown role/);
 });
+
+test('factory prompts end with the shared writing style; replacements do not get it', () => {
+  const cfg = loadConfig('');
+  for (const role of ['designer', 'developer', 'reviewer', 'judge']) {
+    const p = loadPrompt(role, cfg, '');
+    assert.equal(p.match(/## Writing style/g).length, 1, role);
+  }
+  const replaced = loadPrompt('judge', cfg, project({ 'prompts/judge.md': 'Mine.' }));
+  assert.doesNotMatch(replaced, /Writing style/);
+});
+
+test('the developer prompt lists the forbidden paths publish enforces', () => {
+  const dir = project({ 'config.json': JSON.stringify({ design: { dir: 'spec', specFile: 'spec/README.md' } }) });
+  const cfg = loadConfig(dir);
+  const p = loadPrompt('developer', cfg, dir);
+  assert.match(p, /Do not edit `spec\/\*\*`, `\.github\/\*\*` or `CLAUDE\.md`/);
+  assert.doesNotMatch(p, /\{\{/);
+});

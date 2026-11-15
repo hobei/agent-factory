@@ -18,11 +18,13 @@ inputs:
     description: designer | developer | reviewer | judge
     required: true
   working-directory:
-    description: Checkout Claude works in
-    required: true
+    description: Checkout Claude works in (default $WORK_DIR)
+    required: false
+    default: ''
   runtime-directory:
-    description: Directory holding <role>-prompt.md; <role>-result.json is written here
-    required: true
+    description: Directory holding <role>-prompt.md; <role>-result.json is written here (default $RUNTIME_DIR)
+    required: false
+    default: ''
   oauth-token:
     description: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
     required: false
@@ -48,6 +50,7 @@ runs:
         AGENT_DIR: ${{ github.action_path }}/../../agent
       run: |
         set -euo pipefail
+        WD="${WD:-$WORK_DIR}"; RT="${RT:-$RUNTIME_DIR}"
         if [ -z "$OAUTH" ] && [ -z "$APIKEY" ]; then
           echo "::error::Add the CLAUDE_CODE_OAUTH_TOKEN repository secret (run 'claude setup-token' locally)."
           exit 1

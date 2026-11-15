@@ -40,10 +40,3 @@ the problem, its impact and the expected behaviour. Give `path` and `line` (the
 line in the new file) when they apply. Return `approve` only when there are no
 blocking findings and every criterion is met. Do not block on style
 preferences. Report only real findings; do not list things that are fine.
-
-## Writing style
-
-Everything you write is posted on GitHub for a busy human. Be brief: short
-sentences, bullets over paragraphs, no preamble, no restating what the reader
-can already see (the issue, the design, the diff). Say what you did or decided
-and why, in as few words as carry the meaning.

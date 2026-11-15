@@ -113,17 +113,93 @@ count, and a link to the last run.
 
 ## How it works
 
+### The flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor H as Human (maintainer)
+    participant GH as GitHub<br/>issue + PR
+    participant R as route
+    participant D as designer
+    participant Dev as developer
+    participant Rev as CI + reviewer
+    participant J as judge
+
+    H->>GH: open issue (or /agent start)
+    GH->>R: issues event
+    R->>D: design
+    alt request is unclear
+        D->>GH: questions on the issue (agent:needs-info)
+        H->>GH: answer
+        GH->>R: comment → design again
+    end
+    D->>GH: draft PR with the design
+    loop until the design is right
+        H->>GH: comment / request changes
+        GH->>R: review → design (revise)
+        R->>D: design
+        D->>GH: revised design
+    end
+    H->>GH: Approve the design
+    GH->>R: review → develop
+    Note over GH: design frozen as a comment on the issue
+    R->>Dev: develop
+    loop up to 3 developer attempts
+        Dev->>GH: push code, report
+        Dev->>R: dispatch review
+        R->>Rev: review
+        Rev->>GH: agent/ci status + review
+        alt blocking findings
+            Rev->>R: dispatch develop
+            R->>Dev: develop (repair)
+        end
+    end
+    Rev->>R: dispatch judge
+    R->>J: judge
+    alt small, low risk, policy passes
+        J->>GH: squash-merge, close issue
+    else needs a human
+        J->>GH: agent:needs-human
+        alt approve
+            H->>GH: Approve
+            GH->>R: review → control (merge)
+            R->>GH: squash-merge if agent/ci is green, close issue
+        else request changes
+            H->>GH: comment / request changes
+            GH->>R: review → develop (fresh attempts)
+        end
+    end
+    opt any time an agent is working
+        H->>GH: comment / review
+        GH->>R: → control (queue)
+        R->>GH: agent:feedback-queued
+        Note over Dev,J: the running stage hands off to the developer instead of moving on
+    end
+```
+
+Each arrow into `route` is a new workflow run: a human event, or a stage
+dispatching the next one. `route` reads the event and the PR state and picks
+exactly one job.
+
+### The parts
+
 - **One reusable workflow, one router.** The project's `agent.yml` receives
   every event and calls [`agent.yml`](.github/workflows/agent.yml) here. Its
   `route` job runs [`core.route()`](agent/lib/core.cjs), a pure, unit-tested
   function that decides which stage to run from the event and the PR's state.
 - **State lives in the PR description**, in a hidden
-  `<!-- agent-state {...} -->` block: phase, developer attempt, the approved
-  design SHA, the reviewed SHA, and the time of the last stage. Labels are only
-  notifications.
+  `<!-- agent-state {...} -->` block: phase (`design`, `develop`, `review`,
+  `judge`, `human`, `stopped`, `merged`), developer attempt, the approved design
+  SHA, the reviewed SHA, and `feedbackFrom`, the time after which comments are
+  new to the next agent. Labels are notifications, except
+  `agent:feedback-queued`, which carries queued feedback between runs.
 - **Handoffs.** Events created with the built-in `GITHUB_TOKEN` don't trigger
   workflows, so each stage starts the next one with an explicit
-  `workflow_dispatch` of the project's workflow. The router rejects a stale
+  `workflow_dispatch` of the project's workflow. Every stage ends in one
+  function, `handOff()` in [`stages/shared.cjs`](agent/lib/stages/shared.cjs),
+  which sends queued human feedback to the developer first, and otherwise
+  moves the PR to the next stage or a human. The router rejects a stale
   handoff if the PR's phase no longer matches.
 - **Every stage follows the same shape:** `prepare` (trusted script reads
   GitHub, writes the prompt) → **Claude** → `publish` (trusted script validates
@@ -201,9 +277,10 @@ Repository map:
 | Path | What it is |
 |---|---|
 | [`.github/workflows/agent.yml`](.github/workflows/agent.yml) | The reusable workflow: `route` plus one job per stage. The header comment has the overview. |
-| [`actions/stages/`](actions/stages/action.yml) | Runs one function from `stages.cjs` (e.g. `develop.prepare`) with an authenticated GitHub client. |
+| [`actions/stages/`](actions/stages/action.yml) | Runs one function from `agent/lib/stages/` (e.g. `develop.prepare`) with an authenticated GitHub client. |
 | [`actions/run-claude/`](actions/run-claude/action.yml) | Runs one agent with `claude -p`: prompt in, schema-checked JSON result out. |
-| [`agent/lib/stages.cjs`](agent/lib/stages.cjs) | The trusted steps around each agent: prepare, publish, control, failure. |
+| [`agent/lib/stages/`](agent/lib/stages/index.cjs) | The trusted steps around each agent, one file per stage, plus `route`, `control` and the shared `handOff()`. |
+| [`agent/lib/comments.cjs`](agent/lib/comments.cjs) | The text of every agent post, as pure functions. |
 | [`agent/lib/core.cjs`](agent/lib/core.cjs) | Pure logic: routing, PR state, judge policy, parsing. Unit tested. |
 | [`agent/lib/github.cjs`](agent/lib/github.cjs) | GitHub API helpers: comments, labels, state updates, dispatch. |
 | [`agent/lib/config.cjs`](agent/lib/config.cjs) | Merges factory defaults with project overrides; loads prompts. |

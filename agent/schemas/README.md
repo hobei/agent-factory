@@ -11,7 +11,7 @@ trusted workflow code that acts on its answer.
    result that matches it (`structured_output` in the CLI's JSON output).
 2. [`claude-extract.cjs`](../lib/claude-extract.cjs) checks that a result came
    back and saves it as `runtime/<role>-result.json`. No result fails the step.
-3. The stage's `publish` step in [`stages.cjs`](../lib/stages.cjs) reads that
+3. The stage's `publish` step in [`stages/`](../lib/stages/index.cjs) reads that
    file and does everything that touches GitHub.
 
 So Claude never posts, pushes or merges itself. It only fills in fields, and the
