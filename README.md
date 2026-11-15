@@ -196,6 +196,22 @@ Breaking changes to config, prompts or the caller workflow go in `v2`.
 
 ## Development
 
+Repository map:
+
+| Path | What it is |
+|---|---|
+| [`.github/workflows/agent.yml`](.github/workflows/agent.yml) | The reusable workflow: `route` plus one job per stage. The header comment has the overview. |
+| [`actions/stages/`](actions/stages/action.yml) | Runs one function from `stages.cjs` (e.g. `develop.prepare`) with an authenticated GitHub client. |
+| [`actions/run-claude/`](actions/run-claude/action.yml) | Runs one agent with `claude -p`: prompt in, schema-checked JSON result out. |
+| [`agent/lib/stages.cjs`](agent/lib/stages.cjs) | The trusted steps around each agent: prepare, publish, control, failure. |
+| [`agent/lib/core.cjs`](agent/lib/core.cjs) | Pure logic: routing, PR state, judge policy, parsing. Unit tested. |
+| [`agent/lib/github.cjs`](agent/lib/github.cjs) | GitHub API helpers: comments, labels, state updates, dispatch. |
+| [`agent/lib/config.cjs`](agent/lib/config.cjs) | Merges factory defaults with project overrides; loads prompts. |
+| [`agent/config.json`](agent/config.json) | Factory defaults: model, commands, per-role tools, judge limits. |
+| [`agent/prompts/`](agent/prompts/README.md) | Role prompts, and how a full prompt is assembled. |
+| [`agent/schemas/`](agent/schemas/README.md) | Each role's result format, and what each field drives. |
+| [`examples/`](examples) | The caller workflow and config a project copies. |
+
 ```sh
 node --test 'agent/tests/*.test.cjs'   # routing, policy and config logic
 actionlint                              # workflow syntax

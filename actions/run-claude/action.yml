@@ -1,3 +1,14 @@
+# Runs one agent: Claude Code in headless mode (`claude -p`) for a single role.
+#
+#   in:  <runtime>/<role>-prompt.md     written by the stage's prepare/prompt step
+#        agent/schemas/<role>.json      the shape Claude's answer must have
+#        config.json roles.<role>       model, effort and allowed tools
+#   out: <runtime>/<role>-result.json   the validated answer, read by the publish step
+#
+# Claude works in the checkout at `working-directory` and can only use the tools
+# in the role's allowlist (--permission-mode dontAsk denies everything else). It
+# gets the Claude token but never a GitHub token: everything that touches GitHub
+# happens before (prepare) or after (publish) this step, in trusted code.
 name: Run Claude agent
 description: >
   Run Claude Code headless for one agent role with the role's tool allowlist and
@@ -49,6 +60,8 @@ runs:
         if ! command -v claude >/dev/null || [ "$(claude --version 2>/dev/null | awk '{print $1}')" != "$CLI_VERSION" ]; then
           npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLI_VERSION}" >/dev/null
         fi
+        # --json-schema makes Claude return a result matching the role's schema (in the
+        # "structured_output" field of the JSON output) instead of free text.
         args=(-p --output-format json --json-schema "$(cat "$SCHEMA")" --model "$MODEL"
               --permission-mode dontAsk --no-session-persistence)
         if [ -n "$EFFORT" ]; then args+=(--effort "$EFFORT"); fi
@@ -59,8 +72,10 @@ runs:
         cd "$WD"
         set +e
         if [ -n "$OAUTH" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH"; else export ANTHROPIC_API_KEY="$APIKEY"; fi
+        # The whole prompt (role prompt + task context) arrives on stdin.
         claude "${args[@]}" < "$RT/$ROLE-prompt.md" > "$raw"
         code=$?
         set -e
         unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
+        # Fail the step unless the output parses into a result; save it as <role>-result.json.
         node "$AGENT_DIR/lib/claude-extract.cjs" "$raw" "$RT/$ROLE-result.json" "$ROLE" "$code"

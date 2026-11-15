@@ -1,6 +1,16 @@
 'use strict';
 // Pure logic for the agent workflow: PR state, event routing, judge policy and
-// parsing helpers. No GitHub or filesystem access here so it can be unit tested.
+// parsing helpers. No GitHub or filesystem access here so it can be unit tested
+// (agent/tests/core.test.cjs).
+//
+// PR phases (state.phase) and who acts in each:
+//   design     designer drafts/revises; waits for a human Approve
+//   implement  developer is working
+//   review     CI + reviewer agent
+//   judge      judge agent
+//   human      handed to a human (label agent:needs-human)
+//   stopped    paused by /agent stop
+//   merged     done
 
 const BRANCH_PREFIX = 'agent/issue-';
 const STATE_RE = /<!--\s*agent-state\s*(\{[\s\S]*?\})\s*-->/;

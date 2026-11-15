@@ -3,9 +3,28 @@ name: Agent factory
 # Reusable workflow. A project calls it from a small .github/workflows/agent.yml
 # (see examples/agent.yml) that owns the triggers, permissions and secrets.
 #
-# Human events (issues, comments, reviews) and the agents' own handoffs
-# (workflow_dispatch on the caller workflow) all enter through `route`, which
-# decides the stage from the event and the state stored in the PR description.
+# Every run starts with `route`, then runs at most one of the other jobs:
+#
+#   GitHub event ──► route ──► design   issue → design PR (or questions); design feedback
+#   (issue, comment,       ├─► develop  implement the approved design; fix findings/feedback
+#    review, dispatch)     ├─► review   build + test (deterministic), then reviewer agent
+#                          ├─► judge    auto-merge or hand to a human
+#                          └─► control  /agent stop, queue feedback, merge on approval,
+#                                       close the issue after a human merge
+#
+# Human events (issues, comments, reviews) and the agents' own handoffs both enter
+# through `route`. A stage hands off by dispatching this same workflow
+# (workflow_dispatch with stage + number), because events made with GITHUB_TOKEN
+# don't trigger workflows. `route` (agent/lib/core.cjs → route) decides from the
+# event plus the state stored in the PR description.
+#
+# Each agent job has the same steps:
+#   1. checkout project/.github/agent from the DEFAULT branch (settings, prompt overrides)
+#   2. stages: <stage>.prepare   read GitHub, write the prompt to runtime/<role>-prompt.md
+#   3. checkout work/ at the PR head (no credentials)
+#   4. run-claude                the agent edits work/ and returns runtime/<role>-result.json
+#   5. stages: <stage>.publish   validate, commit + push, comment, advance state, dispatch next
+#   6. stages: failure           (only on failure) tell the humans on the PR / issue
 #
 # Factory code comes from the actions at @v1. Project settings and prompt overrides
 # come from the project's default branch (.github/agent), never from a PR branch.

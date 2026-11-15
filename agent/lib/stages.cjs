@@ -1,10 +1,30 @@
 'use strict';
-// Stage implementations, called from the reusable workflow through actions/stages
-// (actions/github-script): require('agent/lib/stages.cjs').<stage>.<step>({github, context, core})
+// The trusted steps around each agent run. The workflow calls them through
+// actions/stages: `call: develop.prepare` → this module's develop.prepare({github, context, core}).
 //
-// Each stage has a `prepare` step (read GitHub, write the agent prompt), the Claude
-// run (in the workflow), and a `publish` step (validate output, commit, push,
-// comment, advance state, dispatch the next stage). Claude never sees a GitHub token.
+// A stage (design, develop, review, judge) is three steps in one job:
+//
+//   prepare   read the issue, PR, conversation and state from GitHub; update the PR
+//             state; write the agent's prompt (writePrompt) and meta.json
+//   (Claude)  actions/run-claude runs the agent in WORK_DIR and writes <role>-result.json
+//   publish   read the result, enforce the rules (allowed paths, …), commit and push,
+//             post comments and replies, advance the PR state, dispatch the next stage
+//
+// review and judge also have a `prompt` step between prepare and Claude, because
+// their prompt needs the CI result or the checked-out diff.
+//
+// Files in RUNTIME_DIR (passing data between steps of one job):
+//   <role>-prompt.md   the full prompt Claude reads on stdin
+//   <role>-result.json Claude's structured answer (shape: agent/schemas/<role>.json)
+//   meta.json          what prepare knew (issue, PR, startedAt, thread ids, …) for publish
+//   ci.log             build + test output (review only)
+//
+// Environment (set by .github/workflows/agent.yml): ISSUE, PR, RESET, RETRY, AMEND,
+// APPROVED_SHA, OP (route outputs); WORK_DIR (PR checkout Claude edits); RUNTIME_DIR;
+// PROJECT_AGENT_DIR (project overrides); PUSH_TOKEN (publish only); CI_OUTCOME (review).
+//
+// PR state lives in a hidden JSON block in the PR description (core.parseState /
+// renderBody); gh.updatePr() read-modify-writes it. Claude never sees a GitHub token.
 
 const fs = require('fs');
 const path = require('path');
@@ -69,6 +89,9 @@ function readJson(name) {
 }
 const readResult = (role) => readJson(`${role}-result.json`);
 
+// Write runtime/<role>-prompt.md: the role prompt (factory or project override, see
+// agent/prompts/README.md), then "# Task context" with one "## <title>" section per
+// [title, text] pair. Empty sections are left out. run-claude pipes this file to Claude.
 function writePrompt(role, sections) {
   const intro = loadPrompt(role, CFG);
   const body = sections
@@ -171,6 +194,8 @@ async function postThreadReplies(gh, prNumber, role, replies, targets, actions) 
 }
 
 // ---------------------------------------------------------------- route
+// First job of every run. Gathers the facts core.route() needs (event, PR state, whether
+// the sender may drive the agents), and sets the outputs that pick the next job.
 
 async function route({ github, context, core: actions }) {
   const gh = new Gh(github, context);
@@ -231,7 +256,12 @@ async function route({ github, context, core: actions }) {
   actions.setOutput('amend', d.amend ? 'true' : 'false');
 }
 
-// ---------------------------------------------------------------- control (/agent stop)
+// ---------------------------------------------------------------- control
+// Quick bookkeeping without Claude. OP is one of:
+//   queue   human feedback while agents are busy → label it for the developer
+//   merge   a maintainer approved the head commit → squash-merge if agent/ci is green
+//   merged  a human merged the PR → close the issue
+//   stop    /agent stop → pause the agents
 
 async function control({ github, context }) {
   const gh = new Gh(github, context);
@@ -279,6 +309,12 @@ async function control({ github, context }) {
 }
 
 // ---------------------------------------------------------------- design
+// Designer agent (prompts/designer.md, schemas/designer.json). Three modes:
+//   new     issue → ask questions on the issue, or open a draft PR with the design
+//   revise  feedback on the design PR → revise it (design is not approved yet)
+//   amend   a human asked to change an approved design → amend it, freeze the new
+//           version on the issue, and hand straight to the developer
+// The designer may only edit the design dir (checked again in publish).
 
 const design = {
   async prepare({ github, context, core: actions }) {
@@ -413,6 +449,13 @@ const design = {
 };
 
 // ---------------------------------------------------------------- develop
+// Developer agent (prompts/developer.md, schemas/developer.json). Implements the
+// approved design, frozen as an issue comment at approval. On a repair round it also
+// gets the feedback since the last stage: reviewer findings and human comments.
+//   prepare  freezes the design on approval, counts the attempt, writes the prompt
+//   between  runs right after Claude, without a GitHub token: checks paths, commits
+//   publish  pushes, replies in threads, dismisses addressed reviews, comments,
+//            then dispatches review (or develop again if feedback was queued)
 
 const develop = {
   async prepare({ github, context, core: actions }) {
@@ -534,6 +577,12 @@ const develop = {
 };
 
 // ---------------------------------------------------------------- review
+// The workflow builds and tests the PR head itself (deterministic CI, posted as the
+// `agent/ci` commit status), then the reviewer agent (prompts/reviewer.md,
+// schemas/reviewer.json) checks the diff against the frozen design. Read-only.
+//   approve            → judge
+//   blocking findings  → develop (until maxDeveloperAttempts, then a human)
+//   queued feedback    → develop, whatever the verdict
 
 const review = {
   async prepare({ github, context, core: actions }) {
@@ -652,6 +701,12 @@ const review = {
 };
 
 // ---------------------------------------------------------------- judge
+// Decides auto-merge vs. human review. Two gates, both must pass to merge:
+//   1. hard policy in code (core.judgePolicy): size limits, protected paths, tests
+//      with source changes, CI green on the reviewed commit, mergeable, design docs
+//      unchanged since approval
+//   2. the judge agent (prompts/judge.md, schemas/judge.json): decision auto_merge
+//      AND risk low
 
 const judge = {
   async prepare({ github, context, core: actions }) {
@@ -737,6 +792,7 @@ const judge = {
 };
 
 // ---------------------------------------------------------------- failure
+// Runs when any step of a stage job fails: tells the humans and how to retry.
 
 async function failure({ github, context }) {
   const gh = new Gh(github, context);

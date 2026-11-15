@@ -1,5 +1,9 @@
 'use strict';
-// Thin wrappers around the GitHub API (octokit from actions/github-script).
+// Thin wrappers around the GitHub API (octokit from actions/github-script), so the
+// stage code reads as "comment / add label / dispatch" instead of raw REST calls.
+// Every write the factory makes to GitHub goes through here, using the job's
+// GITHUB_TOKEN. Comments get a role header (e.g. "### 🛠️ Developer") and a link to
+// the workflow run.
 
 const core = require('./core.cjs');
 const { loadConfig } = require('./config.cjs');
