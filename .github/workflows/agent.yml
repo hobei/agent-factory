@@ -3,9 +3,28 @@ name: Agent factory
 # Reusable workflow. A project calls it from a small .github/workflows/agent.yml
 # (see examples/agent.yml) that owns the triggers, permissions and secrets.
 #
-# Human events (issues, comments, reviews) and the agents' own handoffs
-# (workflow_dispatch on the caller workflow) all enter through `route`, which
-# decides the stage from the event and the state stored in the PR description.
+# Every run starts with `route`, then runs at most one of the other jobs:
+#
+#   GitHub event ──► route ──► design   issue → design PR (or questions); design feedback
+#   (issue, comment,       ├─► develop  implement the approved design; fix findings/feedback
+#    review, dispatch)     ├─► review   build + test (deterministic), then reviewer agent
+#                          ├─► judge    auto-merge or hand to a human
+#                          └─► control  /agent stop, queue feedback, merge on approval,
+#                                       close the issue after a human merge
+#
+# Human events (issues, comments, reviews) and the agents' own handoffs both enter
+# through `route`. A stage hands off by dispatching this same workflow
+# (workflow_dispatch with stage + number), because events made with GITHUB_TOKEN
+# don't trigger workflows. `route` (agent/lib/core.cjs → route) decides from the
+# event plus the state stored in the PR description.
+#
+# Each agent job has the same steps:
+#   1. checkout project/.github/agent from the DEFAULT branch (settings, prompt overrides)
+#   2. stages: <stage>.prepare   read GitHub, write the prompt to runtime/<role>-prompt.md
+#   3. checkout work/ at the PR head (no credentials)
+#   4. run-claude                the agent edits work/ and returns runtime/<role>-result.json
+#   5. stages: <stage>.publish   validate, commit + push, comment, advance state, dispatch next
+#   6. stages: failure           (only on failure) tell the humans on the PR / issue
 #
 # Factory code comes from the actions at @v1. Project settings and prompt overrides
 # come from the project's default branch (.github/agent), never from a PR branch.
@@ -52,14 +71,9 @@ jobs:
       issues: read
       pull-requests: read
     outputs:
-      stage: ${{ steps.route.outputs.stage }}
-      issue: ${{ steps.route.outputs.issue }}
-      pr: ${{ steps.route.outputs.pr }}
-      approved_sha: ${{ steps.route.outputs.approved_sha }}
-      reset: ${{ steps.route.outputs.reset }}
-      retry: ${{ steps.route.outputs.retry }}
-      op: ${{ steps.route.outputs.op }}
-      amend: ${{ steps.route.outputs.amend }}
+      route: ${{ steps.route.outputs.route }} # the decision as JSON → env ROUTE in each job
+      stage: ${{ steps.route.outputs.stage }} # for the jobs' `if:`
+      issue: ${{ steps.route.outputs.issue }} # for the per-issue concurrency group
     steps:
       - uses: actions/checkout@v5
         with:
@@ -72,15 +86,18 @@ jobs:
         with:
           call: route
 
+  # /agent stop, queueing human feedback while agents are busy, merging on a human
+  # approval, and closing the issue after a human merge.
   control:
     needs: route
     if: needs.route.outputs.stage == 'control'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
+      statuses: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -90,8 +107,7 @@ jobs:
           persist-credentials: false
       - uses: hobei/agent-factory/actions/stages@v1
         env:
-          PR: ${{ needs.route.outputs.pr }}
-          OP: ${{ needs.route.outputs.op }}
+          ROUTE: ${{ needs.route.outputs.route }}
         with:
           call: control
 
@@ -111,9 +127,7 @@ jobs:
       issues: write
       pull-requests: write
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
-      AMEND: ${{ needs.route.outputs.amend }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -134,8 +148,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: designer
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}
@@ -166,11 +178,7 @@ jobs:
       issues: write
       pull-requests: write
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
-      RESET: ${{ needs.route.outputs.reset }}
-      RETRY: ${{ needs.route.outputs.retry }}
-      APPROVED_SHA: ${{ needs.route.outputs.approved_sha }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -191,8 +199,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: developer
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}
@@ -227,8 +233,7 @@ jobs:
       pull-requests: write
       statuses: write
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -264,8 +269,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: reviewer
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}
@@ -296,8 +299,7 @@ jobs:
       pull-requests: write
       statuses: read
     env:
-      ISSUE: ${{ needs.route.outputs.issue }}
-      PR: ${{ needs.route.outputs.pr }}
+      ROUTE: ${{ needs.route.outputs.route }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -321,8 +323,6 @@ jobs:
       - uses: hobei/agent-factory/actions/run-claude@v1
         with:
           role: judge
-          working-directory: ${{ env.WORK_DIR }}
-          runtime-directory: ${{ env.RUNTIME_DIR }}
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: ${{ inputs.model }}

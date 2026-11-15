@@ -23,6 +23,13 @@ Check that:
 4. **Nothing deviates from the approved design, and there is no scope creep.**
    Any deviation is blocking, even a reasonable one: the design is the
    contract. Documentation must not have changed since approval.
+   **Maintainer requests are part of the contract.** A change that a
+   maintainer (marked `(maintainer)` in the conversation) asked for after
+   approval is in scope if it doesn't change behaviour, the public API or the
+   acceptance criteria: naming, constants, comments, structure, extra tests.
+   Don't flag it or ask for confirmation; check only that it was done
+   correctly. A maintainer request that would change behaviour needs a
+   redesign; flag it if the developer implemented it anyway.
 5. **CI passed.** A CI failure is always blocking.
 
 You may run `{{build}}` and `{{test}}` (each as its own
@@ -33,10 +40,3 @@ the problem, its impact and the expected behaviour. Give `path` and `line` (the
 line in the new file) when they apply. Return `approve` only when there are no
 blocking findings and every criterion is met. Do not block on style
 preferences. Report only real findings; do not list things that are fine.
-
-## Writing style
-
-Everything you write is posted on GitHub for a busy human. Be brief: short
-sentences, bullets over paragraphs, no preamble, no restating what the reader
-can already see (the issue, the design, the diff). Say what you did or decided
-and why, in as few words as carry the meaning.

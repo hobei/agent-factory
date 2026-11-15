@@ -2,6 +2,7 @@
   "cliVersion": "2.1.323",
   "model": "claude-opus-5-5",
   "maxDeveloperAttempts": 3,
+  "mergeOnHumanApproval": true,
   "workflowFile": "agent.yml",
   "commands": {
     "build": "./scripts/build.sh",

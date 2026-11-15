@@ -1,12 +1,16 @@
 'use strict';
-// Thin wrappers around the GitHub API (octokit from actions/github-script).
+// Thin wrappers around the GitHub API (octokit from actions/github-script), so the
+// stage code reads as "comment / add label / dispatch" instead of raw REST calls.
+// Every write the factory makes to GitHub goes through here, using the job's
+// GITHUB_TOKEN. Comments get a role header (e.g. "### 🛠️ Developer") and a link to
+// the workflow run.
 
 const core = require('./core.cjs');
-const { loadConfig } = require('./config.cjs');
 
 const LABELS = {
   needsInfo: { name: 'agent:needs-info', color: 'fbca04', description: 'Designer agent is waiting for clarification' },
   needsHuman: { name: 'agent:needs-human', color: 'd93f0b', description: 'Agents are done; a human must review and merge' },
+  feedback: { name: 'agent:feedback-queued', color: '1d76db', description: 'Human feedback arrived while agents were busy; the developer picks it up next' },
 };
 
 const BOT_NAME = 'github-actions[bot]';
@@ -14,10 +18,12 @@ const BOT_EMAIL = '41898282+github-actions[bot]@users.noreply.github.com';
 const STATUS_CONTEXT = 'agent/ci';
 
 class Gh {
-  constructor(github, context) {
+  // options.workflowFile: the project's caller workflow, which dispatch() re-runs.
+  constructor(github, context, { workflowFile = 'agent.yml' } = {}) {
     this.github = github;
     this.context = context;
     this.repo = context.repo; // {owner, repo}
+    this.workflowFile = workflowFile;
   }
 
   get runUrl() {
@@ -103,7 +109,7 @@ class Gh {
   async dispatch(stage, number) {
     await this.github.rest.actions.createWorkflowDispatch({
       ...this.repo,
-      workflow_id: loadConfig().workflowFile, // the project's caller workflow
+      workflow_id: this.workflowFile,
       ref: await this.defaultBranch(),
       inputs: { stage, number: String(number) },
     });
@@ -154,6 +160,35 @@ class Gh {
     return { pr, mergeable: false };
   }
 
+  async hasLabel(number, label) {
+    const issue = await this.issue(number);
+    return issue.labels.some((l) => (typeof l === 'string' ? l : l.name) === label.name);
+  }
+
+  // Dismiss humans' CHANGES_REQUESTED reviews submitted before `before` (ISO time):
+  // the developer has addressed them, and the agents re-review the result.
+  async dismissAddressedReviews(prNumber, before, sha, log = () => {}) {
+    const reviews = await this.github.paginate(this.github.rest.pulls.listReviews, { ...this.repo, pull_number: prNumber, per_page: 100 });
+    const stale = reviews.filter((r) => r.state === 'CHANGES_REQUESTED' && r.user && r.user.type !== 'Bot' && String(r.submitted_at) < String(before));
+    for (const r of stale) {
+      try {
+        await this.github.rest.pulls.dismissReview({
+          ...this.repo,
+          pull_number: prNumber,
+          review_id: r.id,
+          message: `Addressed in ${sha.slice(0, 7)}. The agents re-review it; approve or request changes again if needed.`,
+        });
+      } catch (e) {
+        log(`Could not dismiss review ${r.id} by @${r.user.login}: ${e.message}`);
+      }
+    }
+    return stale.length;
+  }
+
+  async squashMerge(pr, sha) {
+    await this.github.rest.pulls.merge({ ...this.repo, pull_number: pr.number, sha, merge_method: 'squash', commit_title: `${pr.title} (#${pr.number})` });
+  }
+
   async files(prNumber) {
     return this.github.paginate(this.github.rest.pulls.listFiles, { ...this.repo, pull_number: prNumber, per_page: 100 });
   }
@@ -163,23 +198,26 @@ class Gh {
     const p = (fn, args) => this.github.paginate(fn, { ...this.repo, per_page: 100, ...args });
     const out = [];
     const isBot = (u) => !u || u.type === 'Bot';
+    // Maintainers = the users allowed to drive the agents. Their requests carry authority.
+    const allowed = (u) => !isBot(u) && core.isAllowed(u.login, this.repo.owner, process.env.AGENT_USERS);
     const issue = await this.issue(issueNumber);
     for (const c of await p(this.github.rest.issues.listComments, { issue_number: issueNumber })) {
-      out.push({ at: c.created_at, author: c.user.login, bot: isBot(c.user), where: `issue #${issueNumber}`, kind: 'comment', body: c.body });
+      out.push({ at: c.created_at, author: c.user.login, bot: isBot(c.user), maintainer: allowed(c.user), where: `issue #${issueNumber}`, kind: 'comment', body: c.body });
     }
     if (prNumber) {
       for (const c of await p(this.github.rest.issues.listComments, { issue_number: prNumber })) {
-        out.push({ at: c.created_at, author: c.user.login, bot: isBot(c.user), where: `PR #${prNumber}`, kind: 'comment', body: c.body });
+        out.push({ at: c.created_at, author: c.user.login, bot: isBot(c.user), maintainer: allowed(c.user), where: `PR #${prNumber}`, kind: 'comment', body: c.body });
       }
       for (const r of await p(this.github.rest.pulls.listReviews, { pull_number: prNumber })) {
         if (!r.body && r.state === 'COMMENTED') continue; // container for inline comments only
-        out.push({ at: r.submitted_at, author: r.user.login, bot: isBot(r.user), where: `PR #${prNumber}`, kind: `review (${r.state})`, body: r.body || '' });
+        out.push({ at: r.submitted_at, author: r.user.login, bot: isBot(r.user), maintainer: allowed(r.user), where: `PR #${prNumber}`, kind: `review (${r.state})`, body: r.body || '' });
       }
       for (const c of await p(this.github.rest.pulls.listReviewComments, { pull_number: prNumber })) {
         out.push({
           at: c.created_at,
           author: c.user.login,
           bot: isBot(c.user),
+          maintainer: allowed(c.user),
           where: `${c.path}:${c.line || c.original_line || '?'}`,
           kind: 'inline comment',
           id: c.id,

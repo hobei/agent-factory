@@ -10,8 +10,12 @@
 //   prompts/<role>.md           replaces the factory prompt for that role
 //   prompts/<role>.append.md    appended to the (factory or replaced) prompt
 //
+// A factory prompt is agent/prompts/<role>.md followed by agent/prompts/_style.md
+// (the writing style all roles share). A project's replacement prompt is used as is.
+//
 // Strings in the config and prompts may use {{build}}, {{test}}, {{designDir}} and
-// {{specFile}}; they are filled in from the merged config.
+// {{specFile}}; prompts may also use {{developerForbiddenPaths}}. They are filled in
+// from the merged config.
 
 const fs = require('fs');
 const path = require('path');
@@ -46,7 +50,11 @@ function projectDir(dir) {
 }
 
 function templateVars(cfg) {
-  return { build: cfg.commands.build, test: cfg.commands.test, designDir: cfg.design.dir, specFile: cfg.design.specFile };
+  const vars = { build: cfg.commands.build, test: cfg.commands.test, designDir: cfg.design.dir, specFile: cfg.design.specFile };
+  // e.g. "`docs/**`, `.github/**` or `CLAUDE.md`", from the paths publish actually enforces
+  const paths = ((cfg.roles && cfg.roles.developer && cfg.roles.developer.forbiddenPaths) || []).map((p) => `\`${fill(p, vars)}\``);
+  vars.developerForbiddenPaths = paths.length > 1 ? `${paths.slice(0, -1).join(', ')} or ${paths[paths.length - 1]}` : paths[0] || '(nothing)';
+  return vars;
 }
 
 function loadConfig(dir) {
@@ -70,9 +78,13 @@ function loadPrompt(role, cfg, dir) {
   const pdir = projectDir(dir);
   const own = pdir ? readIf(path.join(pdir, 'prompts', `${role}.md`)) : null;
   const extra = pdir ? readIf(path.join(pdir, 'prompts', `${role}.append.md`)) : null;
-  const base = own !== null ? own : fs.readFileSync(path.join(FACTORY_DIR, 'prompts', `${role}.md`), 'utf8');
+  const factory = () => {
+    const read = (name) => fs.readFileSync(path.join(FACTORY_DIR, 'prompts', name), 'utf8').trimEnd();
+    return `${read(`${role}.md`)}\n\n${read('_style.md')}\n`;
+  };
+  const base = own !== null ? own : factory();
   const text = extra ? `${base.trimEnd()}\n\n## Project-specific instructions\n\n${extra.trim()}\n` : base;
   return fill(text, templateVars(cfg));
 }
 
-module.exports = { FACTORY_DIR, deepMerge, fill, loadConfig, loadPrompt };
+module.exports = { FACTORY_DIR, ROLES, deepMerge, fill, loadConfig, loadPrompt };

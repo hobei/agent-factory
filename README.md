@@ -83,6 +83,7 @@ Useful config keys:
 | `judge.*` | 8 files, 300 lines, `.github/**` and `CLAUDE.md` protected, `src/**` / `tests/**` | auto-merge policy |
 | `roles.<role>.effort`, `roles.<role>.allowedTools` | see defaults | per-agent settings |
 | `model`, `maxDeveloperAttempts` | `claude-opus-5-5`, 3 | |
+| `mergeOnHumanApproval` | `true` | squash-merge when a maintainer approves a PR handed to them; `false` = merge by hand |
 | `workflowFile` | `agent.yml` | the project workflow the agents dispatch to hand off |
 
 Config strings and prompts can use `{{build}}`, `{{test}}`, `{{designDir}}` and
@@ -99,7 +100,8 @@ The schemas, routing and policy code are not overridable.
 | Comment, or **Request changes** on the design PR | The designer revises the design. It answers inline comments in their own thread. |
 | **Approve** the design PR (latest commit) | The design is frozen on the issue and the developer implements it. Then CI runs, then the reviewer. The developer and reviewer loop up to 3 developer attempts. When the reviewer is satisfied, the judge runs. |
 | Nothing | The judge auto-merges small, low-risk changes. |
-| PR labelled `agent:needs-human` | Review it yourself. **Approve** and merge it, or comment / **Request changes** to send it back to the developer with a fresh 3-attempt budget. The developer answers inline comments in their own thread. |
+| PR labelled `agent:needs-human` | Review it yourself. **Approve** the latest commit and the workflow squash-merges it (if `agent/ci` is green and it merges cleanly), or comment / **Request changes** to send it back to the developer with a fresh 3-attempt budget. The developer answers each inline thread once, and dismisses your "changes requested" review once it has addressed it; the agents then re-review. |
+| Comment or review while the agents are working | Queued (`agent:feedback-queued`). When the running stage finishes, your feedback goes straight to the developer instead of on to the next stage, and it is never auto-merged over. |
 | Comment on a design file in a review, or `/agent redesign <what to change>`, once the PR is labelled `agent:needs-human` | The designer amends the approved design, the amendment is frozen on the issue as the new contract, and the developer and reviewer run again against it. |
 | `/agent retry` (PR or issue comment) | Re-runs the current stage, for example after a failure. Also resumes after `/agent stop`. |
 | `/agent stop` (PR comment) | Pauses the agents on that PR. |
@@ -111,17 +113,93 @@ count, and a link to the last run.
 
 ## How it works
 
+### The flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor H as Human (maintainer)
+    participant GH as GitHub<br/>issue + PR
+    participant R as route
+    participant D as designer
+    participant Dev as developer
+    participant Rev as CI + reviewer
+    participant J as judge
+
+    H->>GH: open issue (or /agent start)
+    GH->>R: issues event
+    R->>D: design
+    alt request is unclear
+        D->>GH: questions on the issue (agent:needs-info)
+        H->>GH: answer
+        GH->>R: comment → design again
+    end
+    D->>GH: draft PR with the design
+    loop until the design is right
+        H->>GH: comment / request changes
+        GH->>R: review → design (revise)
+        R->>D: design
+        D->>GH: revised design
+    end
+    H->>GH: Approve the design
+    GH->>R: review → develop
+    Note over GH: design frozen as a comment on the issue
+    R->>Dev: develop
+    loop up to 3 developer attempts
+        Dev->>GH: push code, report
+        Dev->>R: dispatch review
+        R->>Rev: review
+        Rev->>GH: agent/ci status + review
+        alt blocking findings
+            Rev->>R: dispatch develop
+            R->>Dev: develop (repair)
+        end
+    end
+    Rev->>R: dispatch judge
+    R->>J: judge
+    alt small, low risk, policy passes
+        J->>GH: squash-merge, close issue
+    else needs a human
+        J->>GH: agent:needs-human
+        alt approve
+            H->>GH: Approve
+            GH->>R: review → control (merge)
+            R->>GH: squash-merge if agent/ci is green, close issue
+        else request changes
+            H->>GH: comment / request changes
+            GH->>R: review → develop (fresh attempts)
+        end
+    end
+    opt any time an agent is working
+        H->>GH: comment / review
+        GH->>R: → control (queue)
+        R->>GH: agent:feedback-queued
+        Note over Dev,J: the running stage hands off to the developer instead of moving on
+    end
+```
+
+Each arrow into `route` is a new workflow run: a human event, or a stage
+dispatching the next one. `route` reads the event and the PR state and picks
+exactly one job.
+
+### The parts
+
 - **One reusable workflow, one router.** The project's `agent.yml` receives
   every event and calls [`agent.yml`](.github/workflows/agent.yml) here. Its
   `route` job runs [`core.route()`](agent/lib/core.cjs), a pure, unit-tested
   function that decides which stage to run from the event and the PR's state.
 - **State lives in the PR description**, in a hidden
-  `<!-- agent-state {...} -->` block: phase, developer attempt, the approved
-  design SHA, the reviewed SHA, and the time of the last stage. Labels are only
-  notifications.
+  `<!-- agent-state {...} -->` block: phase (`design`, `develop`, `review`,
+  `judge`, `human`, `stopped`, `merged`), developer attempt, the approved design
+  SHA, the reviewed SHA, and `feedbackFrom`, the time after which comments are
+  new to the next agent. Labels are notifications, except
+  `agent:feedback-queued`, which carries queued feedback between runs.
 - **Handoffs.** Events created with the built-in `GITHUB_TOKEN` don't trigger
   workflows, so each stage starts the next one with an explicit
-  `workflow_dispatch` of the project's workflow. The router rejects a stale
+  `workflow_dispatch` of the project's workflow. Every stage ends in one
+  function, `handOff()` in [`stages/shared.cjs`](agent/lib/stages/shared.cjs),
+  which sends queued human feedback to the developer first, and otherwise
+  moves the PR to the next stage or a human. The router rejects a stale
   handoff if the PR's phase no longer matches.
 - **Every stage follows the same shape:** `prepare` (trusted script reads
   GitHub, writes the prompt) → **Claude** → `publish` (trusted script validates
@@ -150,6 +228,12 @@ count, and a link to the last run.
   approval the design only changes when a human asks for it; the designer then
   amends it and posts a new frozen copy. Any other doc change after approval
   sends the PR to a human.
+- **Maintainers.** Users in `AGENT_USERS` (default: the repo owner) are
+  marked `(maintainer)` in the conversation the agents see. Their requests
+  that refine the approved design (naming, constants, structure, extra tests)
+  are in scope for the developer and reviewer without a redesign. Requests
+  that would change behaviour, the API or the acceptance criteria need
+  `/agent redesign`.
 - **CI.** The review stage runs the build and test commands itself and posts an
   `agent/ci` commit status. A CI failure is always a blocking finding, and
   `agent/ci` is what the judge checks. If the project has its own CI on
@@ -188,6 +272,23 @@ Breaking changes to config, prompts or the caller workflow go in `v2`.
 
 ## Development
 
+Repository map:
+
+| Path | What it is |
+|---|---|
+| [`.github/workflows/agent.yml`](.github/workflows/agent.yml) | The reusable workflow: `route` plus one job per stage. The header comment has the overview. |
+| [`actions/stages/`](actions/stages/action.yml) | Runs one function from `agent/lib/stages/` (e.g. `develop.prepare`) with an authenticated GitHub client. |
+| [`actions/run-claude/`](actions/run-claude/action.yml) | Runs one agent with `claude -p`: prompt in, schema-checked JSON result out. |
+| [`agent/lib/stages/`](agent/lib/stages/index.cjs) | The trusted steps around each agent, one file per stage, plus `route`, `control` and the shared `handOff()`. |
+| [`agent/lib/comments.cjs`](agent/lib/comments.cjs) | The text of every agent post, as pure functions. |
+| [`agent/lib/core.cjs`](agent/lib/core.cjs) | Pure logic: routing, PR state, judge policy, parsing. Unit tested. |
+| [`agent/lib/github.cjs`](agent/lib/github.cjs) | GitHub API helpers: comments, labels, state updates, dispatch. |
+| [`agent/lib/config.cjs`](agent/lib/config.cjs) | Merges factory defaults with project overrides; loads prompts. |
+| [`agent/config.json`](agent/config.json) | Factory defaults: model, commands, per-role tools, judge limits. |
+| [`agent/prompts/`](agent/prompts/README.md) | Role prompts, and how a full prompt is assembled. |
+| [`agent/schemas/`](agent/schemas/README.md) | Each role's result format, and what each field drives. |
+| [`examples/`](examples) | The caller workflow and config a project copies. |
+
 ```sh
 node --test 'agent/tests/*.test.cjs'   # routing, policy and config logic
 actionlint                              # workflow syntax
@@ -195,8 +296,8 @@ actionlint                              # workflow syntax
 
 ## Known limitations
 
-- Comments made while an agent stage is running (phases `implement`, `review`
-  and `judge`) are ignored. Wait for `human`, or use `/agent stop`.
+- Approvals made while an agent stage is running are ignored; approve once the
+  PR is labelled `agent:needs-human`.
 - If the default branch moves and the PR conflicts, the judge hands the PR to a
   human. No agent rebases.
 - The workflow can't yet be overridden per project, only settings and prompts.

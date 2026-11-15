@@ -1,3 +1,23 @@
+# The bridge between the workflow YAML and the factory's JavaScript.
+#
+# Every non-Claude step in .github/workflows/agent.yml is one call to this action:
+#
+#     - uses: hobei/agent-factory/actions/stages@v1
+#       with:
+#         call: develop.prepare        # → agent/lib/stages/develop.cjs → prepare(...)
+#
+# It runs the named function from agent/lib/stages/ inside actions/github-script,
+# which supplies three things the code needs:
+#   github  - an authenticated Octokit client (the job's GITHUB_TOKEN)
+#   context - the triggering event (payload, repo, run id)
+#   core    - @actions/core, for outputs, notices and warnings
+#
+# Why an action rather than inline scripts: the code is loaded from this action's own
+# checkout (github.action_path), i.e. the pinned factory version (@v1). A project's
+# PR branch, which the agents edit, can never change the code that judges it.
+#
+# Outputs: a function passes data to later steps and jobs with core.setOutput().
+# Composite actions must re-declare every output they expose, hence the list below.
 name: Agent factory stage step
 description: >
   Run one trusted step of the agent factory (route, control, <stage>.prepare/publish/...,
@@ -8,15 +28,14 @@ inputs:
     description: Function to run, e.g. `route`, `design.prepare`, `review.publish`
     required: true
 outputs:
-  stage: { description: route result, value: "${{ steps.run.outputs.stage }}" }
-  issue: { description: route result, value: "${{ steps.run.outputs.issue }}" }
-  pr: { description: route result, value: "${{ steps.run.outputs.pr }}" }
-  approved_sha: { description: route result, value: "${{ steps.run.outputs.approved_sha }}" }
-  reset: { description: route result, value: "${{ steps.run.outputs.reset }}" }
-  retry: { description: route result, value: "${{ steps.run.outputs.retry }}" }
-  op: { description: route result, value: "${{ steps.run.outputs.op }}" }
-  amend: { description: route result, value: "${{ steps.run.outputs.amend }}" }
+  # Set by `route`. `route` is the whole decision as JSON (jobs get it as env ROUTE);
+  # `stage` and `issue` are copies the workflow YAML needs for `if:` and `concurrency:`.
+  route: { description: route decision (JSON), value: "${{ steps.run.outputs.route }}" }
+  stage: { description: next job, value: "${{ steps.run.outputs.stage }}" }
+  issue: { description: issue number, value: "${{ steps.run.outputs.issue }}" }
+  # Set by each stage's `prepare`: the commit Claude's working copy is checked out at.
   ref: { description: commit to check out for the agent, value: "${{ steps.run.outputs.ref }}" }
+  # Set by `review.prepare`: the project's commands for the deterministic CI step.
   build: { description: project build command (review.prepare), value: "${{ steps.run.outputs.build }}" }
   test: { description: project test command (review.prepare), value: "${{ steps.run.outputs.test }}" }
 runs:
@@ -29,7 +48,8 @@ runs:
         FACTORY_LIB: ${{ github.action_path }}/../../agent/lib
       with:
         script: |
-          const stages = require(`${process.env.FACTORY_LIB}/stages.cjs`);
+          // "develop.prepare" → stages.develop.prepare; "route" → stages.route
+          const stages = require(`${process.env.FACTORY_LIB}/stages/index.cjs`);
           const [group, step] = process.env.CALL.split('.');
           const fn = step ? stages[group] && stages[group][step] : stages[group];
           if (typeof fn !== 'function') throw new Error(`Unknown factory step "${process.env.CALL}"`);
