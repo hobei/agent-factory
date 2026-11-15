@@ -42,4 +42,5 @@ jobs:
     with:
       agent-users: ${{ vars.AGENT_USERS }}
       model: ${{ vars.AGENT_MODEL }}
+      build-runner: ${{ vars.AGENT_BUILD_RUNNER }}
     secrets: inherit

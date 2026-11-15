@@ -20,6 +20,12 @@ on:
         description: Override the model from config.json
         type: string
         default: ''
+      build-runner:
+        description: >-
+          Runner label for the jobs that build and test the project (develop and review),
+          e.g. macos-15 for an Apple platform project. The other jobs always use Linux.
+        type: string
+        default: ubuntu-24.04
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: false
@@ -149,7 +155,7 @@ jobs:
   develop:
     needs: route
     if: needs.route.outputs.stage == 'develop'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.build-runner || 'ubuntu-24.04' }}
     timeout-minutes: 60
     concurrency:
       group: agent-issue-${{ needs.route.outputs.issue }}
@@ -209,7 +215,7 @@ jobs:
   review:
     needs: route
     if: needs.route.outputs.stage == 'review'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.build-runner || 'ubuntu-24.04' }}
     timeout-minutes: 45
     concurrency:
       group: agent-issue-${{ needs.route.outputs.issue }}

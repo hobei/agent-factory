@@ -55,10 +55,12 @@ flowchart TD
      The default is the repository owner only, so strangers can't spend your
      Claude usage.
    - `AGENT_MODEL`: overrides the model in the config.
+   - `AGENT_BUILD_RUNNER`: the runner for the jobs that build and test (develop
+     and review). The default is `ubuntu-24.04`; use e.g. `macos-15` for a
+     Swift or Xcode project. Routing, design and judge always run on Linux.
 
-This repository is private, so it is shared with repositories owned by the
-same account (**Settings → Actions → General → Access**). Projects owned by
-someone else can't use it.
+Any repository can use the factory, including a public fork. The Claude key
+stays in the project's own secrets; the factory never sees anyone else's.
 
 ## Customising a project
 
