@@ -72,15 +72,18 @@ jobs:
         with:
           call: route
 
+  # /agent stop, queueing human feedback while agents are busy, merging on a human
+  # approval, and closing the issue after a human merge.
   control:
     needs: route
     if: needs.route.outputs.stage == 'control'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
+      statuses: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -92,6 +95,7 @@ jobs:
         env:
           PR: ${{ needs.route.outputs.pr }}
           OP: ${{ needs.route.outputs.op }}
+          APPROVED_SHA: ${{ needs.route.outputs.approved_sha }}
         with:
           call: control
 

@@ -28,11 +28,11 @@
       "items": {
         "type": "string"
       },
-      "description": "Why human review is needed, one short line each. Empty for auto_merge."
+      "description": "Why a human must look, one short line each, most important first. Empty for auto_merge."
     },
     "summary": {
       "type": "string",
-      "description": "Two or three sentences."
+      "description": "One sentence on what decided it. Don't restate the reviewer's findings, the design or the diff."
     }
   }
 }

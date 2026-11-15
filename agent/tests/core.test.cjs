@@ -84,8 +84,16 @@ test('human feedback after hand-over goes to the developer with a fresh attempt 
   const d = lib.route({ ...prEvent('human'), name: 'pull_request_review', review: { state: 'changes_requested' } });
   assert.equal(d.stage, 'develop');
   assert.equal(d.reset, true);
-  assert.equal(lib.route({ ...prEvent('human'), name: 'pull_request_review', review: { state: 'approved' } }).stage, 'none');
   assert.equal(lib.route({ ...prEvent('human'), name: 'issue_comment', comment: { body: 'also handle null' } }).stage, 'develop');
+});
+
+test('human approval after hand-over merges the approved head (mergeOnHumanApproval)', () => {
+  const approve = (extra) => lib.route({ ...prEvent('human'), name: 'pull_request_review', review: { state: 'approved', commitId: 'abc' }, ...extra });
+  const d = approve({ mergeOnApproval: true });
+  assert.deepEqual([d.stage, d.op, d.pr, d.issue, d.approvedSha], ['control', 'merge', 9, 5, 'abc']);
+  assert.equal(approve({ mergeOnApproval: false }).stage, 'none');
+  const stale = lib.route({ ...prEvent('human'), name: 'pull_request_review', review: { state: 'approved', commitId: 'old' }, mergeOnApproval: true });
+  assert.equal(stale.stage, 'none');
 });
 
 test('after hand-over, review comments on design files send the PR back to the designer (amend)', () => {
@@ -120,10 +128,55 @@ test('threadTargets maps inline comments to their thread root', () => {
   assert.deepEqual(lib.threadTargets(undefined), {});
 });
 
-test('comments while agents are busy are ignored', () => {
+test('feedback while agents are busy is queued for the developer; approvals are ignored', () => {
   for (const phase of ['implement', 'review', 'judge']) {
-    assert.equal(lib.route({ ...prEvent(phase), name: 'issue_comment', comment: { body: 'hi' } }).stage, 'none');
+    const c = lib.route({ ...prEvent(phase), name: 'issue_comment', comment: { body: 'use a constant' } });
+    assert.deepEqual([c.stage, c.op, c.pr], ['control', 'queue', 9]);
+    for (const state of ['changes_requested', 'commented']) {
+      const r = lib.route({ ...prEvent(phase), name: 'pull_request_review', review: { state } });
+      assert.deepEqual([r.stage, r.op], ['control', 'queue']);
+    }
+    assert.equal(lib.route({ ...prEvent(phase), name: 'pull_request_review', review: { state: 'approved', commitId: 'abc' }, mergeOnApproval: true }).stage, 'none');
+    assert.equal(lib.route({ ...prEvent(phase), allowed: false, name: 'issue_comment', comment: { body: 'x' } }).stage, 'none');
   }
+  assert.equal(lib.route({ ...prEvent('stopped'), name: 'issue_comment', comment: { body: 'hi' } }).stage, 'none');
+});
+
+test('groupReplies sends one reply per thread and drops duplicates', () => {
+  const targets = { 1: 1, 2: 1, 3: 3 };
+  const g = lib.groupReplies(
+    [
+      { comment_id: 1, body: 'Done: added kNullTag.' },
+      { comment_id: 2, body: 'Done: added kNullTag.' },
+      { comment_id: 2, body: 'Also documented it.' },
+      { comment_id: 3, body: 'No change: see design.' },
+      { comment_id: 99, body: 'stray' },
+      { comment_id: 3, body: '  ' },
+    ],
+    targets,
+  );
+  assert.deepEqual(
+    g.map((x) => [x.root, x.body]),
+    [
+      [1, 'Done: added kNullTag.\n\nAlso documented it.'],
+      [3, 'No change: see design.'],
+      [null, 'stray'],
+    ],
+  );
+});
+
+test('commitTitle makes one short line, with a fallback', () => {
+  assert.equal(lib.commitTitle('Name the null tag constant.\nmore', 'x'), 'Name the null tag constant');
+  assert.equal(lib.commitTitle('  ', 'Implement #2'), 'Implement #2');
+  assert.equal(lib.commitTitle(undefined, 'Implement #2'), 'Implement #2');
+  const long = lib.commitTitle('a'.repeat(100), 'x');
+  assert.equal(long.length, 72);
+});
+
+test('renderBody status shows attempts only after the first', () => {
+  assert.doesNotMatch(lib.renderBody('d', { issue: 1, phase: 'review', attempt: 1, maxAttempts: 3 }), /attempt \d/);
+  assert.match(lib.renderBody('d', { issue: 1, phase: 'implement', attempt: 2, maxAttempts: 3 }), /attempt 2\/3/);
+  assert.match(lib.renderBody('d', { issue: 1, phase: 'human', reason: 'risky' }), /\*\*Needs you\*\*: risky/);
 });
 
 test('/agent stop and /agent retry', () => {

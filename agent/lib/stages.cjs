@@ -89,7 +89,7 @@ function formatConversation(entries, since) {
   const text = entries
     .map((e) => {
       const isNew = since && String(e.at) > String(since) ? ' **NEW**' : '';
-      const who = e.bot ? `${e.author} (agent)` : `@${e.author}`;
+      const who = e.bot ? `${e.author} (agent)` : `@${e.author}${e.maintainer ? ' (maintainer)' : ''}`;
       const id = e.kind === 'inline comment' && e.id ? ` · comment_id ${e.id}` : '';
       return `### ${e.at} · ${who} · ${e.kind} on ${e.where}${id}${isNew}\n${lib.truncate(e.body, 6000)}`;
     })
@@ -127,29 +127,44 @@ async function stoppedMeanwhile(gh, prNumber, actions) {
   return false;
 }
 
-async function escalate(gh, prNumber, issue, reason, role, message) {
+// Human feedback that arrived while a stage ran (label set by the router's `queue`
+// op) goes straight to the developer instead of the next stage or a human.
+// `since` = start of the window whose feedback the developer must see.
+async function redirectQueuedFeedback(gh, prNumber, since, actions) {
+  if (!(await gh.hasLabel(prNumber, LABELS.feedback))) return false;
+  actions.notice('Human feedback arrived during this stage; handing it to the developer.');
+  await gh.removeLabel(prNumber, LABELS.needsHuman);
+  await gh.updatePr(prNumber, { state: { phase: 'implement', reason: null, ...(since ? { since } : {}) } });
+  await gh.dispatch('develop', prNumber);
+  return true;
+}
+
+// Hand the PR to a human. `message` is posted as the role's comment; the reason is
+// appended unless the message already shows it.
+async function escalate(gh, prNumber, issue, reason, role, message, { since, showReason = true, actions } = {}) {
+  if (actions && (await redirectQueuedFeedback(gh, prNumber, since, actions))) {
+    await gh.comment(prNumber, role, message);
+    return;
+  }
   const pr = await gh.pr(prNumber);
   await gh.updatePr(prNumber, { state: { phase: 'human', reason } });
   await gh.markReady(pr).catch(() => {});
   await gh.addLabel(prNumber, LABELS.needsHuman);
   await gh.requestReview(prNumber, issue.user.login);
-  await gh.comment(prNumber, role, `${message}\n\n**Handing over to a human:** ${reason}`);
+  await gh.comment(prNumber, role, showReason ? `${message}\n\n**Needs you:** ${reason}` : message);
 }
 
-// Post the agent's in-thread replies. Only threads the agent was shown are allowed.
-// Returns a Markdown list of replies that could not be posted, for the main comment.
+// Post the agent's in-thread replies, one per thread. Only threads the agent was
+// shown are allowed. Returns a Markdown list of replies that could not be posted.
 async function postThreadReplies(gh, prNumber, role, replies, targets, actions) {
   const lost = [];
-  for (const r of replies || []) {
-    const body = String(r.body || '').trim();
-    if (!body) continue;
-    const root = (targets || {})[String(r.comment_id)];
+  for (const g of lib.groupReplies(replies, targets)) {
     try {
-      if (!root) throw new Error(`comment ${r.comment_id} is not one of the inline comments given to the agent`);
-      await gh.replyInThread(prNumber, root, role, body);
+      if (!g.root) throw new Error(`comment ${g.ids.join(', ')} is not one of the inline comments given to the agent`);
+      await gh.replyInThread(prNumber, g.root, role, g.body);
     } catch (e) {
-      actions.warning(`Could not reply in thread ${r.comment_id}: ${e.message}`);
-      lost.push(`- comment ${r.comment_id}: ${body}`);
+      actions.warning(`Could not reply in thread ${g.ids.join(', ')}: ${e.message}`);
+      lost.push(`- ${g.body.replace(/\n+/g, ' ')}`);
     }
   }
   return lost.length ? `\n\n**Replies to inline comments**\n${lost.join('\n')}` : '';
@@ -166,6 +181,7 @@ async function route({ github, context, core: actions }) {
     action: ev.action,
     sender: { login: ev.sender && ev.sender.login, type: ev.sender && ev.sender.type },
     allowed: lib.isAllowed(ev.sender && ev.sender.login, context.repo.owner, env('AGENT_USERS')),
+    mergeOnApproval: CFG.mergeOnHumanApproval !== false,
   };
   let number;
   if (name === 'workflow_dispatch') {
@@ -222,6 +238,35 @@ async function control({ github, context }) {
   const prNumber = prNumberFromEnv();
   const { state } = await prAndState(gh, prNumber);
   if (env('OP') === 'merged') {
+    await gh.updatePr(prNumber, { state: { phase: 'merged', reason: null } });
+    await gh.removeLabel(prNumber, LABELS.needsHuman);
+    await gh.closeIssue(state.issue, prNumber);
+    return;
+  }
+  if (env('OP') === 'queue') {
+    // The stage that is running hands the feedback to the developer when it finishes.
+    await gh.addLabel(prNumber, LABELS.feedback);
+    return;
+  }
+  if (env('OP') === 'merge') {
+    // A human approved the head commit. `agent/ci` is only set by the review stage,
+    // so a green status means the agents built and tested exactly this commit.
+    const { pr, mergeable } = await gh.waitForMergeable(prNumber);
+    const problems = [];
+    if (pr.head.sha !== env('APPROVED_SHA')) problems.push('new commits were pushed after your approval');
+    if (!(await gh.ciPassed(pr.head.sha))) problems.push('`agent/ci` is not green on the head commit (the agents have not built and tested it)');
+    if (!mergeable) problems.push('GitHub does not report the PR as cleanly mergeable');
+    if (!problems.length) {
+      try {
+        await gh.squashMerge(pr, pr.head.sha);
+      } catch (e) {
+        problems.push(`GitHub refused the merge: ${e.message}`);
+      }
+    }
+    if (problems.length) {
+      await gh.comment(prNumber, 'workflow', `Approved, but not merged:\n${bullet(problems)}\n\nMerge it yourself, or comment to send it back to the developer.`);
+      return;
+    }
     await gh.updatePr(prNumber, { state: { phase: 'merged', reason: null } });
     await gh.removeLabel(prNumber, LABELS.needsHuman);
     await gh.closeIssue(state.issue, prNumber);
@@ -372,9 +417,13 @@ const design = {
 const develop = {
   async prepare({ github, context, core: actions }) {
     const gh = new Gh(github, context);
+    const startedAt = new Date().toISOString();
     const prNumber = prNumberFromEnv();
     const { pr, state } = await prAndState(gh, prNumber);
-    const reset = env('RESET') === 'true';
+    // Queued human feedback counts like feedback in the `human` phase: fresh attempt budget.
+    const queued = await gh.hasLabel(prNumber, LABELS.feedback);
+    if (queued) await gh.removeLabel(prNumber, LABELS.feedback);
+    const reset = env('RESET') === 'true' || queued;
     const retry = env('RETRY') === 'true';
     let attempt = (reset ? 0 : state.attempt || 0) + (retry ? 0 : 1);
     if (attempt < 1) attempt = 1;
@@ -405,6 +454,7 @@ const develop = {
       (e) => state.since && String(e.at) > String(state.since) && (e.body || '').trim() && (!e.bot || e.kind.startsWith('review') || e.kind === 'inline comment'),
     );
     const repair = fresh.length > 0;
+    const humanFeedback = fresh.some((e) => !e.bot);
     writePrompt('developer', [
       [
         'Assignment',
@@ -417,14 +467,16 @@ const develop = {
       ['Feedback to address (new since the last stage)', repair ? untrusted(formatConversation(fresh, null)) : 'None.'],
     ]);
     writeJson('meta.json', {
-      startedAt: new Date().toISOString(),
+      startedAt,
       issue: state.issue,
       pr: prNumber,
       branch: pr.head.ref,
       base: pr.base.ref,
       attempt,
       approvedDesignSha,
-      threads: lib.threadTargets(fresh),
+      humanFeedback,
+      // Reply only in threads with human comments; reviewer findings are answered in the summary.
+      threads: lib.threadTargets(fresh.filter((e) => !e.bot)),
     });
     actions.setOutput('ref', pr.head.sha);
   },
@@ -438,7 +490,8 @@ const develop = {
     const bad = lib.pathViolations(changed, { forbidden: CFG.roles.developer.forbiddenPaths });
     if (bad.length) throw new Error(`Developer edited forbidden paths: ${bad.join(', ')}`);
     if (!changed.length) throw new Error('Developer reported "implemented" but changed no files');
-    commit(`Implement #${meta.issue} (attempt ${meta.attempt})`);
+    const title = lib.commitTitle(result.commit_title, `Implement #${meta.issue}`);
+    commit(`${title}\n\nIssue #${meta.issue}, developer attempt ${meta.attempt}.`);
   },
 
   async publish({ github, context, core: actions }) {
@@ -449,22 +502,32 @@ const develop = {
     if (await stoppedMeanwhile(gh, meta.pr, actions)) return;
 
     if (dev.status === 'blocked') {
-      await escalate(gh, meta.pr, issue, `developer is blocked: ${dev.blocked_reason}`, 'developer', dev.summary || 'I could not implement the approved design.');
+      await escalate(gh, meta.pr, issue, `developer is blocked: ${dev.blocked_reason}`, 'developer', dev.summary || 'I could not implement the approved design.', { since: meta.startedAt, actions });
       return;
     }
 
     push(context, meta.branch);
+    const sha = git(['rev-parse', 'HEAD']).trim();
     const lost = await postThreadReplies(gh, meta.pr, 'developer', dev.thread_replies, meta.threads, actions);
+    const declined = dev.declined || [];
 
-    const tests = (dev.tests || []).map((t) => `| \`${t.command}\` | ${t.passed ? '✅' : '❌'} | ${String(t.detail).replace(/\n/g, ' ').slice(0, 200)} |`).join('\n');
+    // Human change requests this run addressed no longer block; the agents re-review the result.
+    if (meta.humanFeedback && !declined.length) {
+      await gh.dismissAddressedReviews(meta.pr, meta.startedAt, sha, (m) => actions.warning(m));
+    }
+
+    const checks = (dev.tests || []).map((t) => `${t.passed ? '✅' : '❌'} \`${t.command}\`${t.detail ? ` ${String(t.detail).replace(/\n/g, ' ').slice(0, 80)}` : ''}`).join(' · ');
     await gh.comment(
       meta.pr,
       'developer',
-      `**Attempt ${meta.attempt}/${CFG.maxDeveloperAttempts}**\n\n${dev.summary}\n\n` +
-        (tests ? `| Command | Result | Detail |\n|---|---|---|\n${tests}\n\n` : '') +
-        (dev.addressed && dev.addressed.length ? `**Feedback addressed**\n${bullet(dev.addressed)}\n` : '') +
+      (meta.attempt > 1 ? `**Attempt ${meta.attempt}/${CFG.maxDeveloperAttempts}**\n\n` : '') +
+        dev.summary.trim() +
+        (checks ? `\n\n${checks}` : '') +
+        (dev.addressed && dev.addressed.length ? `\n\n**Feedback addressed**\n${bullet(dev.addressed)}` : '') +
+        (declined.length ? `\n\n**Not done: needs a design change** (\`/agent redesign\`)\n${bullet(declined)}` : '') +
         lost,
     );
+    if (await redirectQueuedFeedback(gh, meta.pr, meta.startedAt, actions)) return;
     await gh.updatePr(meta.pr, { state: { phase: 'review', since: meta.startedAt } });
     await gh.dispatch('review', meta.pr);
   },
@@ -546,13 +609,23 @@ const review = {
       }
     }
     const blocking = findings.filter((f) => f.severity === 'blocking').length;
-    const goals = (result.goals || []).map((g) => `| ${g.met ? '✅' : '❌'} | ${g.criterion} | ${String(g.evidence).replace(/\n/g, ' ')} |`).join('\n');
-    const verdict = result.verdict === 'approve' && blocking === 0 ? '✅ **Approved**: ready for the merge judge.' : `❌ **Changes requested** (${blocking} blocking).`;
+    const goalList = result.goals || [];
+    const unmet = goalList.filter((g) => !g.met).length;
+    const goalRows = goalList.map((g) => `| ${g.met ? '✅' : '❌'} | ${g.criterion} | ${String(g.evidence).replace(/\n/g, ' ')} |`).join('\n');
+    const goalTable = `| | Criterion | Evidence |\n|---|---|---|\n${goalRows}`;
+    // All criteria met: one line, table folded away. Otherwise show the table.
+    const goals = !goalList.length
+      ? ''
+      : unmet
+        ? `**Acceptance criteria: ${unmet} of ${goalList.length} not met**\n\n${goalTable}\n\n`
+        : `<details><summary>All ${goalList.length} acceptance criteria met</summary>\n\n${goalTable}\n\n</details>\n\n`;
+    const approved = result.verdict === 'approve' && blocking === 0;
+    const verdict = approved ? '✅ **Approved**' : `❌ **Changes requested** (${blocking} blocking)`;
     const body =
-      `### ${lib.ROLE_ICON.reviewer}\n\n${verdict}\n\n${result.summary}\n\n` +
-      (goals ? `**Design goals**\n\n| | Criterion | Evidence |\n|---|---|---|\n${goals}\n\n` : '') +
-      (general.length ? `**Findings**\n${general.join('\n')}\n\n` : '') +
-      `<sub>Reviewed ${meta.headSha.slice(0, 12)} · CI ${ciPassed ? 'passed' : 'failed'} · [run](${gh.runUrl})</sub>`;
+      `### ${lib.ROLE_ICON.reviewer}\n\n${verdict}: ${result.summary.trim()}\n\n` +
+      goals +
+      (general.length ? `${general.join('\n')}\n\n` : '') +
+      `<sub>${meta.headSha.slice(0, 7)} · CI ${ciPassed ? 'passed' : 'failed'} · [run](${gh.runUrl})</sub>`;
     const reviewArgs = { ...context.repo, pull_number: meta.pr, commit_id: meta.headSha, event: 'COMMENT' };
     try {
       await github.rest.pulls.createReview({ ...reviewArgs, body, comments: inline });
@@ -562,11 +635,15 @@ const review = {
       await github.rest.pulls.createReview({ ...reviewArgs, body: `${body}\n\n**Inline findings**\n${extra}` });
     }
 
+    // Feedback a human gave during develop or review goes to the developer now,
+    // whatever the verdict. It sees everything since the developer's run started.
+    if (await redirectQueuedFeedback(gh, meta.pr, meta.since, actions)) return;
+
     const t = lib.reviewTransition({ verdict: result.verdict, findings, ciPassed, attempt: meta.attempt, maxAttempts: CFG.maxDeveloperAttempts });
     if (t.phase === 'human') {
       const issue = await gh.issue(meta.issue);
       await gh.updatePr(meta.pr, { state: { since: meta.startedAt } });
-      await escalate(gh, meta.pr, issue, t.reason, 'reviewer', 'The developer and reviewer could not converge.');
+      await escalate(gh, meta.pr, issue, t.reason, 'reviewer', 'The developer and reviewer could not converge.', { since: meta.startedAt, actions });
       return;
     }
     await gh.updatePr(meta.pr, { state: { phase: t.phase, since: meta.startedAt, reviewedSha: meta.headSha } });
@@ -601,7 +678,8 @@ const judge = {
     const meta = readJson('meta.json');
     const { state } = await prAndState(gh, meta.pr);
     const { issue, entries } = await gh.conversation(meta.issue, meta.pr);
-    const humans = entries.filter((e) => !e.bot);
+    // Human comments plus inline-thread replies, so the judge can see whether requests were resolved.
+    const humans = entries.filter((e) => !e.bot || e.kind === 'inline comment');
     const lastReview = [...entries].reverse().find((e) => e.bot && e.kind.startsWith('review'));
     // The design is frozen at approval; any later doc edit needs a human.
     const docsAfter = git(['diff', '--name-only', `${state.approvedDesignSha}..HEAD`, '--', CFG.design.dir]).split('\n').filter(Boolean);
@@ -616,7 +694,7 @@ const judge = {
       ['Approved design (frozen at approval)', untrusted(await approvedDesign(gh, state))],
       ['Full PR diff', '```diff\n' + lib.truncate(git(['diff', `origin/${meta.base}...HEAD`]), 150000) + '\n```'],
       ['Reviewer acceptance', untrusted(lastReview ? lastReview.body : '(not found)')],
-      ['Human comments on the issue and PR', untrusted(formatConversation(humans, null))],
+      ['Human comments and inline threads on the issue and PR', untrusted(formatConversation(humans, null))],
     ]);
   },
 
@@ -632,25 +710,29 @@ const judge = {
     const violations = [...meta.violations];
     if (pr.head.sha !== meta.headSha) violations.push('the PR head changed while the judge was running');
 
+    // Human feedback arrived while judging: it goes to the developer, never auto-merge over it.
+    if (await redirectQueuedFeedback(gh, meta.pr, meta.since, actions)) return;
+
     const auto = violations.length === 0 && result.decision === 'auto_merge' && result.risk === 'low';
-    const report =
-      `**Decision:** ${auto ? '✅ auto-merge' : '🧑 human review required'} · **Risk:** ${result.risk}\n\n${result.summary}\n\n` +
-      (result.reasons && result.reasons.length ? `**Judge's reasons**\n${bullet(result.reasons)}\n\n` : '') +
-      (violations.length ? `**Policy checks failed**\n${bullet(violations)}\n` : '**Policy checks:** all passed');
+    const reasons = [...(result.reasons || []), ...violations.map((v) => `Policy: ${v}`)];
+    const report = (merged) =>
+      `${merged ? `✅ **Merged** into \`${pr.base.ref}\`` : '🧑 **Needs you**'} · risk ${result.risk}\n\n${result.summary.trim()}` +
+      (!merged && reasons.length ? `\n\n${bullet(reasons)}` : '');
 
     if (auto) {
       try {
-        await github.rest.pulls.merge({ ...context.repo, pull_number: meta.pr, sha: meta.headSha, merge_method: 'squash', commit_title: `${pr.title} (#${meta.pr})` });
+        await gh.squashMerge(pr, meta.headSha);
         await gh.updatePr(meta.pr, { state: { phase: 'merged' } });
-        await gh.comment(meta.pr, 'judge', `${report}\n\nSquash-merged into \`${pr.base.ref}\`.`);
+        await gh.comment(meta.pr, 'judge', report(true));
         await gh.closeIssue(meta.issue, meta.pr);
         return;
       } catch (e) {
         violations.push(`GitHub refused the merge: ${e.message}`);
+        reasons.push(`Policy: GitHub refused the merge: ${e.message}`);
       }
     }
-    const reason = violations[0] || (result.reasons && result.reasons[0]) || 'judge recommends human review';
-    await escalate(gh, meta.pr, issue, reason, 'judge', report);
+    const reason = (result.reasons && result.reasons[0]) || violations[0] || 'judge recommends human review';
+    await escalate(gh, meta.pr, issue, reason, 'judge', report(false), { since: meta.since, showReason: false, actions });
   },
 };
 

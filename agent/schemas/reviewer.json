@@ -17,7 +17,7 @@
     },
     "summary": {
       "type": "string",
-      "description": "Two or three sentences: the verdict and the main reason."
+      "description": "One sentence: the main reason for the verdict. Don't repeat that CI passed, that criteria are met or that docs are unchanged; the comment shows those."
     },
     "goals": {
       "type": "array",
@@ -73,7 +73,7 @@
           },
           "body": {
             "type": "string",
-            "description": "Problem, impact and expected behaviour, in two or three sentences."
+            "description": "Problem, impact and expected behaviour, in one or two sentences."
           }
         }
       }

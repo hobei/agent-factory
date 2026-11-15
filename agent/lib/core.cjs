@@ -10,6 +10,8 @@ const DESC_END = '<!-- /agent-description -->';
 // Phase -> the stage that does the work in that phase.
 const PHASE_STAGE = { design: 'design', implement: 'develop', review: 'review', judge: 'judge' };
 const STAGES = ['design', 'develop', 'review', 'judge'];
+// Phases in which an agent stage is running. Human feedback then waits in a queue.
+const BUSY_PHASES = ['implement', 'review', 'judge'];
 
 const ROLE_ICON = { designer: '🧭 Designer', developer: '🛠️ Developer', reviewer: '🔍 Reviewer', judge: '⚖️ Judge', workflow: '🤖 Workflow' };
 
@@ -46,9 +48,9 @@ function phaseHint(state) {
     case 'judge':
       return 'Merge judge is deciding whether this can land automatically.';
     case 'human':
-      return `**Needs human review**${state.reason ? `: ${state.reason}` : ''}. Approve and merge, or request changes / comment to send it back to the developer. Comment on the design docs (or \`/agent redesign\`) to change the design first.`;
+      return `**Needs you**${state.reason ? `: ${state.reason}` : ''}\n\nApprove to merge · comment or request changes to send it back to the developer · \`/agent redesign\` to change the design.`;
     case 'merged':
-      return 'Merged automatically by the judge.';
+      return 'Merged.';
     case 'stopped':
       return 'Agents stopped. Comment `/agent retry` to resume.';
     default:
@@ -66,13 +68,11 @@ function renderBody(description, state) {
     `Closes #${state.issue}`,
     '',
     '---',
-    '#### 🤖 Agent status',
-    '',
-    `**Phase:** \`${state.phase}\`${state.attempt ? ` · **Developer attempt:** ${state.attempt}/${state.maxAttempts || 3}` : ''}${state.runUrl ? ` · [last run](${state.runUrl})` : ''}`,
+    `**🤖 Agents:** \`${state.phase}\`${state.attempt > 1 ? ` · attempt ${state.attempt}/${state.maxAttempts || 3}` : ''}${state.runUrl ? ` · [last run](${state.runUrl})` : ''}`,
     '',
     phaseHint(state),
     '',
-    '<sub>Commands: `/agent retry` re-runs the current stage · `/agent stop` pauses the agents · `/agent redesign` (once handed to a human) sends your feedback to the designer.</sub>',
+    '<sub>`/agent retry` · `/agent stop` · `/agent redesign`</sub>',
     '',
     `<!-- agent-state ${safe} -->`,
   ];
@@ -114,6 +114,7 @@ function parseCommand(body) {
  *   prState: parsed agent state | null
  *   comment: {body}, review: {state, commitId, touchesDesign}
  *   dispatch: {stage}
+ *   mergeOnApproval: boolean          // config mergeOnHumanApproval
  * }
  * returns { stage: 'none'|'design'|'develop'|'review'|'judge'|'control', ...flags, note }
  */
@@ -190,7 +191,8 @@ function route(i) {
     if (cmd) return none(`unknown command /agent ${cmd}`);
     if (st.phase === 'design') return { ...base, stage: 'design', note: 'design feedback → designer' };
     if (st.phase === 'human') return { ...base, stage: 'develop', reset: true, note: 'human feedback → developer' };
-    return none(`agents are busy (phase "${st.phase}"); comment again once the PR needs you`);
+    if (BUSY_PHASES.includes(st.phase)) return { ...base, stage: 'control', op: 'queue', note: `human feedback queued for the developer (phase "${st.phase}")` };
+    return none(`comment ignored in phase "${st.phase}"`);
   }
 
   if (i.name === 'pull_request_review') {
@@ -205,11 +207,19 @@ function route(i) {
       return { ...base, stage: 'design', note: 'design review feedback → designer' };
     }
     if (st.phase === 'human') {
-      if (state === 'approved') return none('implementation approved by a human; merge when ready');
+      if (state === 'approved') {
+        if (!i.mergeOnApproval) return none('implementation approved by a human; merge when ready');
+        if (i.review.commitId !== pr.headSha) return none('approval is for an older commit; approve the latest commit to merge');
+        return { ...base, stage: 'control', op: 'merge', approvedSha: pr.headSha, note: 'approved by a human → merge' };
+      }
       if (i.review.touchesDesign) return { ...base, stage: 'design', amend: true, note: 'design feedback after approval → designer amends the design' };
       return { ...base, stage: 'develop', reset: true, note: 'human review feedback → developer' };
     }
-    return none(`review ignored while agents are busy (phase "${st.phase}")`);
+    if (BUSY_PHASES.includes(st.phase)) {
+      if (state === 'approved') return none(`approval ignored while agents are busy (phase "${st.phase}")`);
+      return { ...base, stage: 'control', op: 'queue', note: `human review queued for the developer (phase "${st.phase}")` };
+    }
+    return none(`review ignored in phase "${st.phase}"`);
   }
 
   return none(`unhandled event ${i.name}`);
@@ -225,6 +235,35 @@ function threadTargets(entries) {
     if (e.kind === 'inline comment' && e.id) out[String(e.id)] = e.root || e.id;
   }
   return out;
+}
+
+// One reply per thread: replies aimed at comments in the same thread are merged.
+// Returns [{root, body, ids}] in first-seen order; unknown comment ids get root null.
+function groupReplies(replies, targets) {
+  const byRoot = new Map();
+  const out = [];
+  for (const r of replies || []) {
+    const body = String(r.body || '').trim();
+    if (!body) continue;
+    const root = (targets || {})[String(r.comment_id)] || null;
+    const key = root || `unknown:${r.comment_id}`;
+    let g = byRoot.get(key);
+    if (!g) {
+      g = { root, bodies: [], ids: [] };
+      byRoot.set(key, g);
+      out.push(g);
+    }
+    if (!g.bodies.includes(body)) g.bodies.push(body);
+    g.ids.push(r.comment_id);
+  }
+  return out.map((g) => ({ root: g.root, ids: g.ids, body: g.bodies.join('\n\n') }));
+}
+
+// A single-line commit title from the developer's suggestion.
+function commitTitle(suggested, fallback) {
+  const line = String(suggested || '').split('\n')[0].replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '');
+  if (!line) return fallback;
+  return line.length > 72 ? `${line.slice(0, 71).trimEnd()}…` : line;
 }
 
 // ---------------------------------------------------------------- review outcome
@@ -341,6 +380,7 @@ function truncate(text, max) {
 module.exports = {
   BRANCH_PREFIX,
   PHASE_STAGE,
+  BUSY_PHASES,
   ROLE_ICON,
   parseState,
   parseDescription,
@@ -356,6 +396,8 @@ module.exports = {
   pathViolations,
   commentableLines,
   threadTargets,
+  groupReplies,
+  commitTitle,
   parseClaudeOutput,
   truncate,
 };

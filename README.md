@@ -83,6 +83,7 @@ Useful config keys:
 | `judge.*` | 8 files, 300 lines, `.github/**` and `CLAUDE.md` protected, `src/**` / `tests/**` | auto-merge policy |
 | `roles.<role>.effort`, `roles.<role>.allowedTools` | see defaults | per-agent settings |
 | `model`, `maxDeveloperAttempts` | `claude-opus-5-5`, 3 | |
+| `mergeOnHumanApproval` | `true` | squash-merge when a maintainer approves a PR handed to them; `false` = merge by hand |
 | `workflowFile` | `agent.yml` | the project workflow the agents dispatch to hand off |
 
 Config strings and prompts can use `{{build}}`, `{{test}}`, `{{designDir}}` and
@@ -99,7 +100,8 @@ The schemas, routing and policy code are not overridable.
 | Comment, or **Request changes** on the design PR | The designer revises the design. It answers inline comments in their own thread. |
 | **Approve** the design PR (latest commit) | The design is frozen on the issue and the developer implements it. Then CI runs, then the reviewer. The developer and reviewer loop up to 3 developer attempts. When the reviewer is satisfied, the judge runs. |
 | Nothing | The judge auto-merges small, low-risk changes. |
-| PR labelled `agent:needs-human` | Review it yourself. **Approve** and merge it, or comment / **Request changes** to send it back to the developer with a fresh 3-attempt budget. The developer answers inline comments in their own thread. |
+| PR labelled `agent:needs-human` | Review it yourself. **Approve** the latest commit and the workflow squash-merges it (if `agent/ci` is green and it merges cleanly), or comment / **Request changes** to send it back to the developer with a fresh 3-attempt budget. The developer answers each inline thread once, and dismisses your "changes requested" review once it has addressed it; the agents then re-review. |
+| Comment or review while the agents are working | Queued (`agent:feedback-queued`). When the running stage finishes, your feedback goes straight to the developer instead of on to the next stage, and it is never auto-merged over. |
 | Comment on a design file in a review, or `/agent redesign <what to change>`, once the PR is labelled `agent:needs-human` | The designer amends the approved design, the amendment is frozen on the issue as the new contract, and the developer and reviewer run again against it. |
 | `/agent retry` (PR or issue comment) | Re-runs the current stage, for example after a failure. Also resumes after `/agent stop`. |
 | `/agent stop` (PR comment) | Pauses the agents on that PR. |
@@ -150,6 +152,12 @@ count, and a link to the last run.
   approval the design only changes when a human asks for it; the designer then
   amends it and posts a new frozen copy. Any other doc change after approval
   sends the PR to a human.
+- **Maintainers.** Users in `AGENT_USERS` (default: the repo owner) are
+  marked `(maintainer)` in the conversation the agents see. Their requests
+  that refine the approved design (naming, constants, structure, extra tests)
+  are in scope for the developer and reviewer without a redesign. Requests
+  that would change behaviour, the API or the acceptance criteria need
+  `/agent redesign`.
 - **CI.** The review stage runs the build and test commands itself and posts an
   `agent/ci` commit status. A CI failure is always a blocking finding, and
   `agent/ci` is what the judge checks. If the project has its own CI on
@@ -195,8 +203,8 @@ actionlint                              # workflow syntax
 
 ## Known limitations
 
-- Comments made while an agent stage is running (phases `implement`, `review`
-  and `judge`) are ignored. Wait for `human`, or use `/agent stop`.
+- Approvals made while an agent stage is running are ignored; approve once the
+  PR is labelled `agent:needs-human`.
 - If the default branch moves and the PR conflicts, the judge hands the PR to a
   human. No agent rebases.
 - The workflow can't yet be overridden per project, only settings and prompts.

@@ -21,6 +21,12 @@ Require `human_review` for:
 - anything that departs from the approved design
 - anything you cannot fully assess
 
+A maintainer's request for changes is **resolved** when the developer has
+replied that it is done, the reviewer accepted the result, and the maintainer
+hasn't objected since. The workflow dismisses a formal "changes requested"
+review once the developer addresses it, so a dismissed review is not open.
+Don't hand a PR to a human only to re-confirm a resolved request.
+
 Do not equate a small diff with a simple change.
 
 The workflow also enforces hard policy limits. If it reports violations, the

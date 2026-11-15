@@ -7,7 +7,9 @@
     "tests",
     "addressed",
     "blocked_reason",
-    "thread_replies"
+    "thread_replies",
+    "commit_title",
+    "declined"
   ],
   "properties": {
     "status": {
@@ -19,7 +21,7 @@
     },
     "summary": {
       "type": "string",
-      "description": "Short Markdown summary of the changes: a few bullets, no restating of the design."
+      "description": "2-4 short bullets: what changed and why. Don't list what stayed the same, files you didn't touch, or test results (reported separately)."
     },
     "tests": {
       "type": "array",
@@ -40,7 +42,7 @@
           },
           "detail": {
             "type": "string",
-            "description": "One short line, e.g. '12/12 passed'."
+            "description": "A few words, e.g. '3/3 passed'."
           }
         }
       }
@@ -50,7 +52,7 @@
       "items": {
         "type": "string"
       },
-      "description": "One short line per review finding or human request that was NOT answered in a thread. Empty on a first implementation."
+      "description": "One short line per reviewer finding you acted on. Not for comments you answered in a thread. Empty on a first implementation."
     },
     "blocked_reason": {
       "type": "string",
@@ -72,11 +74,22 @@
           },
           "body": {
             "type": "string",
-            "description": "One or two sentences: what you did about this comment, or why you made no change."
+            "description": "One sentence: what you did, or why you made no change. No thanks, no restating the request."
           }
         }
       },
-      "description": "One in-thread reply per NEW inline review comment you were given. Empty if there are none."
+      "description": "At most one reply per human thread you were given. Empty if there are none."
+    },
+    "commit_title": {
+      "type": "string",
+      "description": "Imperative commit title for this round's change, at most 72 characters, e.g. 'Load empty !!null nodes as Null' or 'Name the null tag constant'. No issue number."
+    },
+    "declined": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Maintainer requests you did NOT implement because they need a design change, one short line each. Usually empty."
     }
   }
 }
